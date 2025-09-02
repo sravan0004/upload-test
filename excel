@@ -1,0 +1,30 @@
+int totalSheet = 0; //No of sheets in Excel file  
+using (OleDbConnection oledbConnection = new OleDbConnection(
+				(fileName.TrimEnd().ToLower().EndsWith("x"))
+				? "Provider=Microsoft.ACE.OLEDB.12.0;Data Source='" + fileName + "';" + "Extended Properties='Excel 12.0 Xml;HDR=YES;'"
+				: "provider=Microsoft.Jet.OLEDB.4.0;Data Source='" + fileName + "';Extended Properties=Excel 8.0;"))
+{
+				oledbConnection.Open();
+				OleDbCommand command = new OleDbCommand();
+				OleDbDataAdapter dataAdapter = new OleDbDataAdapter();
+				DataSet dataSet = new DataSet();
+				DataTable dataTable = oledbConnection.GetOleDbSchemaTable(OleDbSchemaGuid.Tables, null);
+				if (dataTable != null)
+				{
+					var tempDataTable = (from dataRow in dataTable.AsEnumerable()
+										 where !dataRow["TABLE_NAME"].ToString().Contains("FilterDatabase")
+										 && !dataRow["TABLE_NAME"].ToString().Contains("List")
+										 select dataRow).CopyToDataTable();
+					dataTable = tempDataTable;
+					totalSheet = dataTable.Rows.Count;
+				}
+
+				command.Connection = oledbConnection;
+				command.CommandType = CommandType.Text;
+				command.CommandText = "SELECT * FROM [" + sheetName + "$]";
+				//cmd.CommandText = String.Format("select * from [{0}${1}]", sheetName, "A2:ZZ");
+				//cmd.CommandText = String.Format("select * from [{0}${1}]", "Sheet1", "A2:ZZ");
+				dataAdapter = new OleDbDataAdapter(command);
+				dataAdapter.Fill(dataSet, "excelData");
+				dtResult = dataSet.Tables["excelData"];
+				oledbConnection.Close();
