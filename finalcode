@@ -1,0 +1,296 @@
+public class HeaderConfig
+{
+    public bool Required { get; set; }
+    public string Type { get; set; } // string, date, number
+
+    // Optional extra rules
+    public string Format { get; set; }      // for dates
+    public int? Min { get; set; }           // for numbers
+    public int? Max { get; set; }           // for numbers
+    public int? MaxLength { get; set; }     // for strings
+    public string Regex { get; set; }       // custom validation
+}
+
+
+using System.Text.RegularExpressions;
+
+public static class ExcelValidator
+{
+    public static List<ExcelRecord> ValidateData(DataTable dt, string jsonConfigPath)
+    {
+        var config = JsonConvert.DeserializeObject<Dictionary<string, HeaderConfig>>(
+            File.ReadAllText(jsonConfigPath));
+
+        var records = new List<ExcelRecord>();
+        var headerRow = dt.Rows[0];
+        var questionRow = dt.Rows[1];
+
+        for (int r = 2; r < dt.Rows.Count; r++) // answers start at row 3
+        {
+            var row = dt.Rows[r];
+            for (int c = 0; c < dt.Columns.Count; c++)
+            {
+                string headerId = headerRow[c]?.ToString()?.Trim();
+                string questionText = questionRow[c]?.ToString()?.Trim();
+                string value = row[c]?.ToString()?.Trim();
+
+                if (string.IsNullOrEmpty(headerId)) continue;
+
+                var record = new ExcelRecord
+                {
+                    Id = headerId,
+                    RowId = r - 1,
+                    QuestionText = questionText,
+                    Value = value,
+                    ErrorMsg = ""
+                };
+
+                if (config.TryGetValue(headerId, out var headerCfg))
+                {
+                    // 1. Required check
+                    if (headerCfg.Required && string.IsNullOrEmpty(value))
+                    {
+                        record.ErrorMsg = $"Missing required answer for '{headerId}'";
+                    }
+
+                    // 2. Type + Format checks
+                    if (!string.IsNullOrEmpty(value))
+                    {
+                        switch (headerCfg.Type?.ToLower())
+                        {
+                            case "date":
+                                if (!DateTime.TryParseExact(
+                                        value,
+                                        headerCfg.Format ?? "MM/dd/yyyy",
+                                        null,
+                                        System.Globalization.DateTimeStyles.None,
+                                        out _))
+                                {
+                                    record.ErrorMsg = $"Invalid date format for '{headerId}'. Expected {headerCfg.Format ?? "MM/dd/yyyy"}";
+                                }
+                                break;
+
+                            case "number":
+                                if (!decimal.TryParse(value, out var num))
+                                {
+                                    record.ErrorMsg = $"Invalid number for '{headerId}'";
+                                }
+                                else
+                                {
+                                    if (headerCfg.Min.HasValue && num < headerCfg.Min.Value)
+                                        record.ErrorMsg = $"Value for '{headerId}' is less than Min {headerCfg.Min}";
+                                    if (headerCfg.Max.HasValue && num > headerCfg.Max.Value)
+                                        record.ErrorMsg = $"Value for '{headerId}' is greater than Max {headerCfg.Max}";
+                                }
+                                break;
+
+                            case "string":
+                            default:
+                                if (headerCfg.MaxLength.HasValue && value.Length > headerCfg.MaxLength.Value)
+                                    record.ErrorMsg = $"'{headerId}' exceeds max length {headerCfg.MaxLength}";
+
+                                if (!string.IsNullOrEmpty(headerCfg.Regex) &&
+                                    !Regex.IsMatch(value, headerCfg.Regex))
+                                    record.ErrorMsg = $"'{headerId}' does not match required pattern";
+                                break;
+                        }
+                    }
+                }
+
+                records.Add(record);
+            }
+        }
+
+        return records;
+    }
+}
+
+
+public class ValidationError
+{
+    public int RowId { get; set; }
+    public string ColumnId { get; set; }
+    public string Message { get; set; }
+}
+
+
+public static class ExcelValidator
+{
+    public static List<ExcelRecord> ValidateData(DataTable dt, string jsonConfigPath)
+    {
+        var config = JsonConvert.DeserializeObject<Dictionary<string, HeaderConfig>>(
+            File.ReadAllText(jsonConfigPath));
+
+        var records = new List<ExcelRecord>();
+        var headerRow = dt.Rows[0];
+        var questionRow = dt.Rows[1];
+
+        for (int r = 2; r < dt.Rows.Count; r++) // answers start at row 3
+        {
+            var row = dt.Rows[r];
+            for (int c = 0; c < dt.Columns.Count; c++)
+            {
+                string headerId = headerRow[c]?.ToString()?.Trim();
+                string questionText = questionRow[c]?.ToString()?.Trim();
+                string value = row[c]?.ToString()?.Trim();
+
+                if (string.IsNullOrEmpty(headerId)) continue;
+
+                var record = new ExcelRecord
+                {
+                    Id = headerId,
+                    RowId = r - 1,
+                    QuestionText = questionText,
+                    Value = value,
+                    ErrorMsg = ""
+                };
+
+                if (config.TryGetValue(headerId, out var headerCfg))
+                {
+                    // Required check
+                    if (headerCfg.Required && string.IsNullOrEmpty(value))
+                    {
+                        record.ErrorMsg = $"Missing required answer for '{headerId}'";
+                    }
+
+                    // Type validation
+                    if (!string.IsNullOrEmpty(value))
+                    {
+                        switch (headerCfg.Type?.ToLower())
+                        {
+                            case "date":
+                                if (!DateTime.TryParse(value, out _))
+                                    record.ErrorMsg = $"Invalid date format for '{headerId}'";
+                                break;
+                            case "number":
+                                if (!decimal.TryParse(value, out _))
+                                    record.ErrorMsg = $"Invalid number format for '{headerId}'";
+                                break;
+                            case "string":
+                            default:
+                                break;
+                        }
+                    }
+                }
+
+                records.Add(record);
+            }
+        }
+
+        return records;
+    }
+}
+
+
+using System.Data;
+using ExcelDataReader;
+
+public static class ExcelHelper
+{
+    public static DataTable ReadExcelToDataTable(string filePath)
+    {
+        using var stream = File.Open(filePath, FileMode.Open, FileAccess.Read);
+        using var reader = ExcelReaderFactory.CreateReader(stream);
+
+        var result = reader.AsDataSet(new ExcelDataSetConfiguration
+        {
+            ConfigureDataTable = _ => new ExcelDataTableConfiguration
+            {
+                UseHeaderRow = false // we handle headers manually
+            }
+        });
+
+        return result.Tables[0]; // assuming first sheet
+    }
+}
+
+using Newtonsoft.Json;
+
+public static class ExcelValidator
+{
+    public static List<string> ValidateHeaders(DataTable dt, string jsonConfigPath)
+    {
+        var errors = new List<string>();
+        var config = JsonConvert.DeserializeObject<Dictionary<string, HeaderConfig>>(
+            File.ReadAllText(jsonConfigPath));
+
+        var headerRow = dt.Rows[0];
+        for (int col = 0; col < dt.Columns.Count; col++)
+        {
+            string headerId = headerRow[col]?.ToString()?.Trim();
+            if (string.IsNullOrEmpty(headerId)) continue;
+
+            if (!config.ContainsKey(headerId))
+                errors.Add($"Unexpected header ID '{headerId}' in column {col + 1}");
+        }
+
+        return errors;
+    }
+
+    public static List<ExcelRecord> ValidateData(DataTable dt, string jsonConfigPath)
+    {
+        var config = JsonConvert.DeserializeObject<Dictionary<string, HeaderConfig>>(
+            File.ReadAllText(jsonConfigPath));
+
+        var records = new List<ExcelRecord>();
+        var headerRow = dt.Rows[0];
+        var questionRow = dt.Rows[1];
+
+        for (int r = 2; r < dt.Rows.Count; r++) // answers start at row 3
+        {
+            var row = dt.Rows[r];
+            for (int c = 0; c < dt.Columns.Count; c++)
+            {
+                string headerId = headerRow[c]?.ToString()?.Trim();
+                string questionText = questionRow[c]?.ToString()?.Trim();
+                string value = row[c]?.ToString()?.Trim();
+
+                if (string.IsNullOrEmpty(headerId)) continue;
+
+                var record = new ExcelRecord
+                {
+                    Id = headerId,
+                    RowId = r - 1, // user row index
+                    QuestionText = questionText,
+                    Value = value,
+                    ErrorMsg = ""
+                };
+
+                // Required field check
+                if (config.TryGetValue(headerId, out var headerCfg) && headerCfg.Required)
+                {
+                    if (string.IsNullOrEmpty(value))
+                    {
+                        record.ErrorMsg = $"Missing required answer for '{headerId}'";
+                    }
+                }
+
+                records.Add(record);
+            }
+        }
+
+        return records;
+    }
+}
+string excelPath = @"C:\Temp\EcRf-Template.xlsx";
+string configPath = @"C:\Temp\header-config.json";
+
+// Step 1: Read to DataTable
+DataTable dt = ExcelHelper.ReadExcelToDataTable(excelPath);
+
+// Step 2a: Validate headers
+var headerErrors = ExcelValidator.ValidateHeaders(dt, configPath);
+if (headerErrors.Any())
+{
+    Console.WriteLine("Header Errors:");
+    headerErrors.ForEach(Console.WriteLine);
+}
+
+// Step 2b: Validate data
+var records = ExcelValidator.ValidateData(dt, configPath);
+
+// Print errors
+foreach (var rec in records.Where(r => !string.IsNullOrEmpty(r.ErrorMsg)))
+{
+    Console.WriteLine($"Row {rec.RowId}, {rec.Id}: {rec.ErrorMsg}");
+}
