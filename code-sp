@@ -1,349 +1,160 @@
-namespace YourApp.Models
+public class Specimen
 {
-    public class ValidationResult
-    {
-        public bool IsValid { get; set; } = true;
-        public List<string> Errors { get; set; } = new();
-    }
+    public int ID { get; set; }  // mandatory
+    public string SpecimenIdentifier { get; set; } = string.Empty; // mandatory
+    public string PanelIdentifier { get; set; } = string.Empty; // mandatory
+
+    public string Study { get; set; } = string.Empty;
+    public string Sex { get; set; } = string.Empty;
+    public string SampleType { get; set; } = string.Empty;
+
+    // Add other columns as needed...
 }
 
-public List<SpecimenEntity> ProcessCsv(Stream fileStream, out ValidationResult validationResult)
+
+public class LookupValidator
 {
-    var specimens = new List<SpecimenEntity>();
-    validationResult = new ValidationResult();
+    private readonly ApplicationDbContext _context;
 
-    using var reader = new StreamReader(fileStream);
-    var headerLine = reader.ReadLine();
-    if (string.IsNullOrEmpty(headerLine))
+    public LookupValidator(ApplicationDbContext context)
     {
-        validationResult.IsValid = false;
-        validationResult.Errors.Add("CSV is empty or missing header row.");
-        return specimens;
+        _context = context;
     }
 
-    var headers = headerLine.Split(',');
-    var headerCheck = ValidateHeaders(headers);
-    if (!headerCheck.IsValid)
+    // Mandatory field check
+    public List<string> ValidateMandatoryFields(string id, string specimenIdentifier, string panelIdentifier)
     {
-        validationResult.IsValid = false;
-        validationResult.Errors.AddRange(headerCheck.Errors);
-        return specimens;
+        var errors = new List<string>();
+
+        if (string.IsNullOrWhiteSpace(id))
+            errors.Add("ID is required.");
+
+        if (string.IsNullOrWhiteSpace(specimenIdentifier))
+            errors.Add("Specimen Identifier is required.");
+
+        if (string.IsNullOrWhiteSpace(panelIdentifier))
+            errors.Add("Panel Identifier is required.");
+
+        return errors;
     }
 
-    string? line;
-    int rowIndex = 1;
-
-    while ((line = reader.ReadLine()) != null)
+    public List<string> ValidateStudy(string csvStudies)
     {
-        rowIndex++;
-        var values = line.Split(',');
-
-        var entity = new SpecimenEntity();
-
-        foreach (var column in SpecimenHeaders.ColumnTypes)
+        var errors = new List<string>();
+        if (string.IsNullOrWhiteSpace(csvStudies))
         {
-            var colIndex = Array.FindIndex(headers, h => h.Equals(column.Key, StringComparison.OrdinalIgnoreCase));
-            if (colIndex == -1) continue;
-
-            var rawValue = values[colIndex];
-
-            try
-            {
-                var typedValue = ConvertValue(rawValue, column.Value);
-
-                if (_headerToProperty.TryGetValue(column.Key, out var propName))
-                {
-                    var prop = typeof(SpecimenEntity).GetProperty(propName);
-                    if (prop != null)
-                        prop.SetValue(entity, typedValue);
-                }
-            }
-            catch (Exception ex)
-            {
-                validationResult.IsValid = false;
-                validationResult.Errors.Add($"Row {rowIndex}, Column '{column.Key}': {ex.Message}");
-            }
+            errors.Add("Study is required.");
+            return errors;
         }
 
-        specimens.Add(entity);
-    }
+        var inputStudies = csvStudies.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var dbStudies = _context.Studies.Select(s => s.Name).ToList();
 
-    return specimens;
-}
-
-[HttpPost]
-public async Task<IActionResult> Upload(IFormFile file)
-{
-    if (file == null || file.Length == 0)
-    {
-        ViewBag.Errors = new List<string> { "No file uploaded." };
-        return View("Index");
-    }
-
-    using var stream = file.OpenReadStream();
-    try
-    {
-        var specimens = _csvProcessor.ProcessCsv(stream, out var validation);
-
-        if (!validation.IsValid)
+        foreach (var s in inputStudies)
         {
-            ViewBag.Errors = validation.Errors;
-            return View("Index");
+            if (!dbStudies.Contains(s, StringComparer.OrdinalIgnoreCase))
+                errors.Add($"Invalid Study: {s}");
         }
 
-        _db.Specimens.AddRange(specimens);
-        await _db.SaveChangesAsync();
-
-        ViewBag.SuccessMessage = $"{specimens.Count} records processed and saved.";
-        return View("Index");
+        return errors;
     }
-    catch (Exception ex)
+
+    public List<string> ValidateSex(string sexValue)
     {
-        ViewBag.Errors = new List<string> { $"Unexpected error: {ex.Message}" };
-        return View("Index");
-    }
-}
-@{
-    ViewData["Title"] = "Upload Specimen CSV";
-    var errors = ViewBag.Errors as List<string>;
-    var successMessage = ViewBag.SuccessMessage as string;
-}
-
-<h2>Upload CSV</h2>
-
-@if (errors != null && errors.Any())
-{
-    <div style="color:red; margin-bottom:10px;">
-        <strong>Errors found:</strong>
-        <ul>
-            @foreach (var error in errors)
-            {
-                <li>@error</li>
-            }
-        </ul>
-    </div>
-}
-
-@if (!string.IsNullOrEmpty(successMessage))
-{
-    <div style="color:green; margin-bottom:10px;">
-        <strong>@successMessage</strong>
-    </div>
-}
-
-<form asp-action="Upload" asp-controller="FileUpload" method="post" enctype="multipart/form-data">
-    <div>
-        <input type="file" name="file" required />
-    </div>
-    <br />
-    <button type="submit">Upload</button>
-</form>
-
-
-
-using System.Globalization;
-using YourApp.Helpers;
-using YourApp.Models;
-
-namespace YourApp.Services
-{
-    public class CsvProcessor
-    {
-        private readonly Dictionary<string, string> _headerToProperty = new()
+        var errors = new List<string>();
+        if (string.IsNullOrWhiteSpace(sexValue))
         {
-            { "ID", "ID" },
-            { "Panel", "Panel" },
-            { "Specimen Identifier", "SpecimenIdentifier" },
-            { "Study", "Study" },
-            { "Deidentified Patient Id", "DeidentifiedPatientId" },
-            { "Total Specimen Volume", "TotalSpecimenVolume" },
-            { "# of Aliquots", "NumberOfAliquots" },
-            { "Sample Type", "SampleType" },
-            { "Box Number", "BoxNumber" },
-            { "Box Sort Number", "BoxSortNumber" },
-            { "Sort Number", "SortNumber" },
-            { "Whole Blood Aliquot", "WholeBloodAliquot" },
-            { "Whole Blood Box Number", "WholeBloodBoxNumber" },
-            { "Status", "Status" },
-            { "Comment", "Comment" },
-            { "Collection Site", "CollectionSite" },
-            { "City", "City" },
-            { "Country", "Country" },
-            { "Collection Date", "CollectionDate" },
-            { "Sex", "Sex" },
-            { "Age", "Age" },
-            { "Clinic Type", "ClinicType" }
-        };
-
-        public ValidationResult ValidateHeaders(string[] headers)
-        {
-            var result = new ValidationResult();
-
-            foreach (var required in SpecimenHeaders.RequiredHeaders)
-            {
-                if (!headers.Contains(required, StringComparer.OrdinalIgnoreCase))
-                {
-                    result.IsValid = false;
-                    result.Errors.Add($"Missing required header: {required}");
-                }
-            }
-
-            return result;
+            errors.Add("Sex is required.");
+            return errors;
         }
 
-        private object ConvertValue(string value, Type targetType)
+        var dbSexes = _context.Sexes.Select(s => s.Value).ToList();
+        if (!dbSexes.Contains(sexValue, StringComparer.OrdinalIgnoreCase))
+            errors.Add($"Invalid Sex: {sexValue}");
+
+        return errors;
+    }
+
+    public List<string> ValidateSampleType(string csvSampleTypes)
+    {
+        var errors = new List<string>();
+        if (string.IsNullOrWhiteSpace(csvSampleTypes))
         {
-            if (string.IsNullOrWhiteSpace(value))
-                return targetType == typeof(string) ? string.Empty : Activator.CreateInstance(targetType);
-
-            try
-            {
-                if (targetType == typeof(int))
-                    return int.Parse(value, CultureInfo.InvariantCulture);
-
-                if (targetType == typeof(decimal))
-                    return decimal.Parse(value, CultureInfo.InvariantCulture);
-
-                if (targetType == typeof(DateTime))
-                    return DateTime.Parse(value, CultureInfo.InvariantCulture);
-
-                return value;
-            }
-            catch
-            {
-                throw new Exception($"Value '{value}' is not valid for type {targetType.Name}");
-            }
+            errors.Add("Sample Type is required.");
+            return errors;
         }
 
-        public List<SpecimenEntity> ProcessCsv(Stream fileStream)
+        var inputTypes = csvSampleTypes.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var dbTypes = _context.SampleTypes.Select(s => s.Name).ToList();
+
+        foreach (var t in inputTypes)
         {
-            var specimens = new List<SpecimenEntity>();
+            if (!dbTypes.Contains(t, StringComparer.OrdinalIgnoreCase))
+                errors.Add($"Invalid Sample Type: {t}");
+        }
 
-            using var reader = new StreamReader(fileStream);
-            var headerLine = reader.ReadLine();
-            if (string.IsNullOrEmpty(headerLine))
-                throw new Exception("CSV is empty or missing header row.");
+        return errors;
+    }
+}
 
-            var headers = headerLine.Split(',');
-            var validation = ValidateHeaders(headers);
-            if (!validation.IsValid)
-                throw new Exception(string.Join("; ", validation.Errors));
+var validator = new LookupValidator(_context);
 
-            string? line;
-            int rowIndex = 1;
+int rowNumber = 1;
+foreach (var row in parsedRows)
+{
+    var errors = new List<string>();
 
-            while ((line = reader.ReadLine()) != null)
-            {
-                rowIndex++;
-                var values = line.Split(',');
+    // 1. Mandatory checks
+    errors.AddRange(validator.ValidateMandatoryFields(row.ID, row.SpecimenIdentifier, row.PanelIdentifier));
 
-                var entity = new SpecimenEntity();
+    // 2. Lookup checks
+    errors.AddRange(validator.ValidateStudy(row.Study));
+    errors.AddRange(validator.ValidateSex(row.Sex));
+    errors.AddRange(validator.ValidateSampleType(row.SampleType));
 
-                foreach (var column in SpecimenHeaders.ColumnTypes)
-                {
-                    var colIndex = Array.FindIndex(headers, h => h.Equals(column.Key, StringComparison.OrdinalIgnoreCase));
-                    if (colIndex == -1) continue;
+    if (errors.Any())
+    {
+        errorList.AddRange(errors.Select(e => $"Row {rowNumber}: {e}"));
+        rowNumber++;
+        continue; // Skip saving this invalid row
+    }
 
-                    var rawValue = values[colIndex];
-                    var typedValue = ConvertValue(rawValue, column.Value);
+    // ✅ If valid, map to entity and save
+    var specimen = new Specimen
+    {
+        ID = int.Parse(row.ID), // safe here since it's already validated
+        SpecimenIdentifier = row.SpecimenIdentifier,
+        PanelIdentifier = row.PanelIdentifier,
+        Study = row.Study,
+        Sex = row.Sex,
+        SampleType = row.SampleType
+    };
 
-                    if (_headerToProperty.TryGetValue(column.Key, out var propName))
-                    {
-                        var prop = typeof(SpecimenEntity).GetProperty(propName);
-                        if (prop != null)
-                            prop.SetValue(entity, typedValue);
-                    }
-                }
+    _context.Specimens.Add(specimen);
+    rowNumber++;
+}
+await _context.SaveChangesAsync();
 
-                specimens.Add(entity);
-            }
+public List<string> ValidateMandatoryFields(Dictionary<string, string> fields)
+{
+    var errors = new List<string>();
 
-            return specimens;
+    foreach (var field in fields)
+    {
+        if (string.IsNullOrWhiteSpace(field.Value))
+        {
+            errors.Add($"{field.Key} is required.");
         }
     }
-}
-namespace YourApp.Models
-{
-    public class SpecimenEntity
-    {
-        public int ID { get; set; }
-        public string Panel { get; set; }
-        public string SpecimenIdentifier { get; set; }
-        public string Study { get; set; }
-        public string DeidentifiedPatientId { get; set; }
-        public decimal TotalSpecimenVolume { get; set; }
-        public int NumberOfAliquots { get; set; }
-        public string SampleType { get; set; }
-        public string BoxNumber { get; set; }
-        public string BoxSortNumber { get; set; }
-        public string SortNumber { get; set; }
-        public string WholeBloodAliquot { get; set; }
-        public string WholeBloodBoxNumber { get; set; }
-        public string Status { get; set; }
-        public string Comment { get; set; }
-        public string CollectionSite { get; set; }
-        public string City { get; set; }
-        public string Country { get; set; }
-        public DateTime CollectionDate { get; set; }
-        public string Sex { get; set; }
-        public int Age { get; set; }
-        public string ClinicType { get; set; }
-    }
-}
-namespace YourApp.Helpers
-{
-    public static class SpecimenHeaders
-    {
-        public static readonly string[] RequiredHeaders =
-        {
-            "ID",
-            "Panel",
-            "Specimen Identifier",
-            "Study",
-            "Deidentified Patient Id",
-            "Total Specimen Volume",
-            "# of Aliquots",
-            "Sample Type",
-            "Box Number",
-            "Box Sort Number",
-            "Sort Number",
-            "Whole Blood Aliquot",
-            "Whole Blood Box Number",
-            "Status",
-            "Comment",
-            "Collection Site",
-            "City",
-            "Country",
-            "Collection Date",
-            "Sex",
-            "Age",
-            "Clinic Type"
-        };
 
-        public static readonly Dictionary<string, Type> ColumnTypes = new()
-        {
-            { "ID", typeof(int) },
-            { "Panel", typeof(string) },
-            { "Specimen Identifier", typeof(string) },
-            { "Study", typeof(string) },
-            { "Deidentified Patient Id", typeof(string) },
-            { "Total Specimen Volume", typeof(decimal) },
-            { "# of Aliquots", typeof(int) },
-            { "Sample Type", typeof(string) },
-            { "Box Number", typeof(string) },
-            { "Box Sort Number", typeof(string) },
-            { "Sort Number", typeof(string) },
-            { "Whole Blood Aliquot", typeof(string) },
-            { "Whole Blood Box Number", typeof(string) },
-            { "Status", typeof(string) },
-            { "Comment", typeof(string) },
-            { "Collection Site", typeof(string) },
-            { "City", typeof(string) },
-            { "Country", typeof(string) },
-            { "Collection Date", typeof(DateTime) },
-            { "Sex", typeof(string) },
-            { "Age", typeof(int) },
-            { "Clinic Type", typeof(string) }
-        };
-    }
+    return errors;
 }
+var mandatoryFields = new Dictionary<string, string>
+{
+    { "ID", row.ID },
+    { "Specimen Identifier", row.SpecimenIdentifier },
+    { "Panel Identifier", row.PanelIdentifier }
+    // 👉 later just add more fields here, no need to change the validator
+};
+
+errors.AddRange(validator.ValidateMandatoryFields(mandatoryFields));
