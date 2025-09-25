@@ -1,87 +1,110 @@
-public IActionResult Upload()
+public class SpecimenUploadController : Controller
 {
-    Guid guid = Guid.NewGuid();
-    var file = HttpContext.Request.Form.Files[0];
+    private readonly IDDAContext _context;
 
-    string filepath = $"{ConfigurationHelper.SpecimenFileUploadPath}\\{guid.ToString()}.csv";
-    using (var fileStream = new FileStream(filepath, FileMode.Create, FileAccess.Write))
+    public SpecimenUploadController(IDDAContext context)
     {
-        file.OpenReadStream().CopyTo(fileStream);
+        _context = context;
     }
 
-    // System.IO.File.Delete(filepath);
-
-    if (file == null || file.Length == 0)
+    [HttpPost]
+    public IActionResult Upload()
     {
-        ViewBag.Errors = new List<string> { "No file uploaded." };
-        return View("Index");
-    }
+        var file = HttpContext.Request.Form.Files.FirstOrDefault();
 
-    using var stream = file.OpenReadStream();
-    try
-    {
-        var _csvProcessor = new CsvProcessor();
-        var specimens = _csvProcessor.ProcessCsv(stream, out var validation);
-
-
-        var validator = new LookupValidator(_context);
-        var errorList = new List<string>();
-        int rowNumber = 1;
-
-        foreach (var row in specimens)
+        if (file == null || file.Length == 0)
         {
-            var errors = new List<string>();
+            ViewBag.Errors = new List<string> { "No file uploaded." };
+            return View("Index");
+        }
 
-            var mandatoryFields = new Dictionary<string, string>
+        // Save file temporarily (optional)
+        var guid = Guid.NewGuid();
+        var filepath = Path.Combine(ConfigurationHelper.SpecimenFileUploadPath, $"{guid}.csv");
+        using (var fileStream = new FileStream(filepath, FileMode.Create, FileAccess.Write))
+        {
+            file.CopyTo(fileStream);
+        }
+
+        using var stream = file.OpenReadStream();
+
+        try
+        {
+            var processor = new CsvProcessor();
+            var specimens = processor.ProcessCsv(stream, out var validation);
+
+            if (!validation.IsValid)
+            {
+                ViewBag.Errors = validation.Errors;
+                return View("Index");
+            }
+
+            var validator = new LookupValidator(_context);
+            var errorList = new List<string>();
+            var validSpecimens = new List<Specimen>();
+
+            int rowNumber = 1;
+            foreach (var row in specimens)
+            {
+                var errors = new List<string>();
+
+                // 1. Mandatory fields
+                var mandatoryFields = new Dictionary<string, string>
                 {
                     { "ID", row.ID.ToString() },
                     { "Specimen Identifier", row.SpecimenIdentifier },
                     { "Panel Identifier", row.PanelIdentifier }
                 };
+                errors.AddRange(validator.ValidateMandatoryFields(mandatoryFields));
 
-            errors.AddRange(validator.ValidateMandatoryFields(mandatoryFields));
+                // 2. Lookup & business rules
+                errors.AddRange(validator.ValidateStudy(row.Study));
+                errors.AddRange(validator.ValidateSex(row.Sex));
+                errors.AddRange(validator.ValidateSampleType(row.SampleType));
+                errors.AddRange(validator.ValidateAge(row.Age));
 
-            errors.AddRange(validator.ValidateStudy(row.Study));
-            errors.AddRange(validator.ValidateSex(row.Sex));
-            errors.AddRange(validator.ValidateSampleType(row.SampleType));
-            errors.AddRange(validator.ValidateAge(row.Age));
+                if (errors.Any())
+                {
+                    errorList.AddRange(errors.Select(e => $"Row {rowNumber}: {e}"));
+                }
+                else
+                {
+                    // Only keep valid rows
+                    validSpecimens.Add(new Specimen
+                    {
+                        ID = row.ID,
+                        SpecimenIdentifier = row.SpecimenIdentifier,
+                        PanelIdentifier = row.PanelIdentifier,
+                        StudyCodeName = row.Study,
+                        Sex = row.Sex,
+                        SampleTypeCode = row.SampleType,
+                        Age = row.Age
+                    });
+                }
 
-            if (errors.Any())
-            {
-                errorList.AddRange(errors.Select(e => $"Row {rowNumber}: {e}"));
                 rowNumber++;
-                continue;
             }
 
-            var specimen = new Specimen
+            if (errorList.Any())
             {
-                ID = row.ID,
-                SpecimenIdentifier = row.SpecimenIdentifier,
-                PanelIdentifier = row.PanelIdentifier,
-                StudyCodeName = row.Study,
-                Sex = row.Sex,
-                SampleTypeCode = row.SampleType
-            };
+                ViewBag.Errors = errorList;
+                return View("Index");
+            }
 
-            rowNumber++;
-        }
+            // ✅ Save valid specimens to DB
+            _context.Specimen.AddRange(validSpecimens);
+            _context.SaveChanges();
 
-        if (!validation.IsValid)
-        {
-            ViewBag.Errors = validation.Errors;
+            ViewBag.SuccessMessage = $"{validSpecimens.Count} records processed and saved.";
             return View("Index");
         }
-
-        // TODO - Finish DB Process
-
-        ViewBag.SuccessMessage = $"{specimens.Count} records processed and saved.";
-        return View("Index");
+        catch (Exception ex)
+        {
+            ViewBag.Errors = new List<string> { $"Unexpected error: {ex.Message}" };
+            return View("Index");
+        }
     }
-    catch (Exception ex)
-    {
-        ViewBag.Errors = new List<string> { $"Unexpected error: {ex.Message}" };
-        return View("Index");
-    }
+}
 
 public List<SpecimenBulkUpdateModel> ProcessCsv(Stream fileStream, out ValidationResult validationResult)
 {
@@ -113,7 +136,6 @@ public List<SpecimenBulkUpdateModel> ProcessCsv(Stream fileStream, out Validatio
     {
         rowIndex++;
         var values = line.Split(',');
-
         var entity = new SpecimenBulkUpdateModel();
 
         foreach (var column in SpecimenHeaders.ColumnTypes)
@@ -146,6 +168,7 @@ public List<SpecimenBulkUpdateModel> ProcessCsv(Stream fileStream, out Validatio
 
     return specimens;
 }
+
 public class LookupValidator
 {
     private readonly IDDAContext _context;
@@ -240,3 +263,142 @@ public class LookupValidator
         return errors;
     }
 }
+
+
+[HttpPost]
+public IActionResult Upload()
+{
+    var file = HttpContext.Request.Form.Files.FirstOrDefault();
+
+    if (file == null || file.Length == 0)
+    {
+        TempData["Errors"] = string.Join(Environment.NewLine, new[] { "No file uploaded." });
+        TempData["ErrorCount"] = 1;
+        return RedirectToAction("Index");
+    }
+
+    using var stream = file.OpenReadStream();
+
+    try
+    {
+        var processor = new CsvProcessor();
+        var specimens = processor.ProcessCsv(stream, out var validation);
+
+        if (!validation.IsValid)
+        {
+            TempData["Errors"] = string.Join(Environment.NewLine, validation.Errors);
+            TempData["ErrorCount"] = validation.Errors.Count;
+            return RedirectToAction("Index");
+        }
+
+        var validator = new LookupValidator(_context);
+        var errorList = new List<string>();
+        var validSpecimens = new List<Specimen>();
+
+        int rowNumber = 1;
+        foreach (var row in specimens)
+        {
+            var errors = new List<string>();
+
+            // Mandatory fields
+            var mandatoryFields = new Dictionary<string, string>
+            {
+                { "ID", row.ID.ToString() },
+                { "Specimen Identifier", row.SpecimenIdentifier },
+                { "Panel Identifier", row.PanelIdentifier }
+            };
+            errors.AddRange(validator.ValidateMandatoryFields(mandatoryFields));
+
+            // Lookup & business rules
+            errors.AddRange(validator.ValidateStudy(row.Study));
+            errors.AddRange(validator.ValidateSex(row.Sex));
+            errors.AddRange(validator.ValidateSampleType(row.SampleType));
+            errors.AddRange(validator.ValidateAge(row.Age));
+
+            if (errors.Any())
+            {
+                errorList.AddRange(errors.Select(e => $"Row {rowNumber}: {e}"));
+            }
+            else
+            {
+                validSpecimens.Add(new Specimen
+                {
+                    ID = row.ID,
+                    SpecimenIdentifier = row.SpecimenIdentifier,
+                    PanelIdentifier = row.PanelIdentifier,
+                    StudyCodeName = row.Study,
+                    Sex = row.Sex,
+                    SampleTypeCode = row.SampleType,
+                    Age = row.Age
+                });
+            }
+
+            rowNumber++;
+        }
+
+        if (errorList.Any())
+        {
+            TempData["Errors"] = string.Join(Environment.NewLine, errorList);
+            TempData["ErrorCount"] = errorList.Count;
+            return RedirectToAction("Index");
+        }
+
+        // ✅ Save valid specimens
+        _context.Specimen.AddRange(validSpecimens);
+        _context.SaveChanges();
+
+        ViewBag.SuccessMessage = $"{validSpecimens.Count} records processed and saved.";
+        return View("Index");
+    }
+    catch (Exception ex)
+    {
+        TempData["Errors"] = string.Join(Environment.NewLine, new[] { $"Unexpected error: {ex.Message}" });
+        TempData["ErrorCount"] = 1;
+        return RedirectToAction("Index");
+    }
+}
+
+[HttpGet]
+public IActionResult DownloadErrors()
+{
+    if (!TempData.ContainsKey("Errors"))
+        return RedirectToAction("Index");
+
+    var errorText = TempData["Errors"].ToString();
+    var bytes = System.Text.Encoding.UTF8.GetBytes(errorText ?? "");
+    var fileName = $"UploadErrors_{DateTime.Now:yyyyMMdd_HHmmss}.txt";
+
+    return File(bytes, "text/plain", fileName);
+}
+
+
+@{
+    ViewData["Title"] = "Upload Specimen CSV";
+    var successMessage = ViewBag.SuccessMessage as string;
+    var errorCount = TempData["ErrorCount"] as int?;
+}
+
+<h2>Upload CSV</h2>
+
+@if (!string.IsNullOrEmpty(successMessage))
+{
+    <div style="color:green; margin-bottom:10px;">
+        <strong>@successMessage</strong>
+    </div>
+}
+
+@if (errorCount.HasValue && errorCount > 0)
+{
+    <div style="color:red; margin-bottom:10px;">
+        <strong>@errorCount errors found.</strong><br />
+        <a asp-action="DownloadErrors" class="btn btn-danger">Download Error Report</a>
+    </div>
+}
+
+<form asp-action="Upload" asp-controller="SpecimenUpload" method="post" enctype="multipart/form-data">
+    <div>
+        <input type="file" name="file" required />
+    </div>
+    <br />
+    <button type="submit" class="btn btn-primary">Upload</button>
+</form>
