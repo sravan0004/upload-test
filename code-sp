@@ -1,39 +1,171 @@
-public class Specimen
+public IActionResult Upload()
 {
-    public int ID { get; set; }  // mandatory
-    public string SpecimenIdentifier { get; set; } = string.Empty; // mandatory
-    public string PanelIdentifier { get; set; } = string.Empty; // mandatory
+    Guid guid = Guid.NewGuid();
+    var file = HttpContext.Request.Form.Files[0];
 
-    public string Study { get; set; } = string.Empty;
-    public string Sex { get; set; } = string.Empty;
-    public string SampleType { get; set; } = string.Empty;
+    string filepath = $"{ConfigurationHelper.SpecimenFileUploadPath}\\{guid.ToString()}.csv";
+    using (var fileStream = new FileStream(filepath, FileMode.Create, FileAccess.Write))
+    {
+        file.OpenReadStream().CopyTo(fileStream);
+    }
 
-    // Add other columns as needed...
+    // System.IO.File.Delete(filepath);
+
+    if (file == null || file.Length == 0)
+    {
+        ViewBag.Errors = new List<string> { "No file uploaded." };
+        return View("Index");
+    }
+
+    using var stream = file.OpenReadStream();
+    try
+    {
+        var _csvProcessor = new CsvProcessor();
+        var specimens = _csvProcessor.ProcessCsv(stream, out var validation);
+
+
+        var validator = new LookupValidator(_context);
+        var errorList = new List<string>();
+        int rowNumber = 1;
+
+        foreach (var row in specimens)
+        {
+            var errors = new List<string>();
+
+            var mandatoryFields = new Dictionary<string, string>
+                {
+                    { "ID", row.ID.ToString() },
+                    { "Specimen Identifier", row.SpecimenIdentifier },
+                    { "Panel Identifier", row.PanelIdentifier }
+                };
+
+            errors.AddRange(validator.ValidateMandatoryFields(mandatoryFields));
+
+            errors.AddRange(validator.ValidateStudy(row.Study));
+            errors.AddRange(validator.ValidateSex(row.Sex));
+            errors.AddRange(validator.ValidateSampleType(row.SampleType));
+            errors.AddRange(validator.ValidateAge(row.Age));
+
+            if (errors.Any())
+            {
+                errorList.AddRange(errors.Select(e => $"Row {rowNumber}: {e}"));
+                rowNumber++;
+                continue;
+            }
+
+            var specimen = new Specimen
+            {
+                ID = row.ID,
+                SpecimenIdentifier = row.SpecimenIdentifier,
+                PanelIdentifier = row.PanelIdentifier,
+                StudyCodeName = row.Study,
+                Sex = row.Sex,
+                SampleTypeCode = row.SampleType
+            };
+
+            rowNumber++;
+        }
+
+        if (!validation.IsValid)
+        {
+            ViewBag.Errors = validation.Errors;
+            return View("Index");
+        }
+
+        // TODO - Finish DB Process
+
+        ViewBag.SuccessMessage = $"{specimens.Count} records processed and saved.";
+        return View("Index");
+    }
+    catch (Exception ex)
+    {
+        ViewBag.Errors = new List<string> { $"Unexpected error: {ex.Message}" };
+        return View("Index");
+    }
+
+public List<SpecimenBulkUpdateModel> ProcessCsv(Stream fileStream, out ValidationResult validationResult)
+{
+    var specimens = new List<SpecimenBulkUpdateModel>();
+    validationResult = new ValidationResult();
+
+    using var reader = new StreamReader(fileStream);
+    var headerLine = reader.ReadLine();
+    if (string.IsNullOrEmpty(headerLine))
+    {
+        validationResult.IsValid = false;
+        validationResult.Errors.Add("CSV is empty or missing header row.");
+        return specimens;
+    }
+
+    var headers = headerLine.Split(',');
+    var headerCheck = ValidateHeaders(headers);
+    if (!headerCheck.IsValid)
+    {
+        validationResult.IsValid = false;
+        validationResult.Errors.AddRange(headerCheck.Errors);
+        return specimens;
+    }
+
+    string? line;
+    int rowIndex = 1;
+
+    while ((line = reader.ReadLine()) != null)
+    {
+        rowIndex++;
+        var values = line.Split(',');
+
+        var entity = new SpecimenBulkUpdateModel();
+
+        foreach (var column in SpecimenHeaders.ColumnTypes)
+        {
+            var colIndex = Array.FindIndex(headers, h => h.Equals(column.Key, StringComparison.OrdinalIgnoreCase));
+            if (colIndex == -1) continue;
+
+            var rawValue = values[colIndex];
+
+            try
+            {
+                var typedValue = ConvertValue(rawValue, column.Value);
+
+                if (_headerToProperty.TryGetValue(column.Key, out var propName))
+                {
+                    var prop = typeof(SpecimenBulkUpdateModel).GetProperty(propName);
+                    if (prop != null)
+                        prop.SetValue(entity, typedValue);
+                }
+            }
+            catch (Exception ex)
+            {
+                validationResult.IsValid = false;
+                validationResult.Errors.Add($"Row {rowIndex}, Column '{column.Key}': {ex.Message}");
+            }
+        }
+
+        specimens.Add(entity);
+    }
+
+    return specimens;
 }
-
-
 public class LookupValidator
 {
-    private readonly ApplicationDbContext _context;
+    private readonly IDDAContext _context;
 
-    public LookupValidator(ApplicationDbContext context)
+    public LookupValidator(IDDAContext context)
     {
         _context = context;
     }
 
-    // Mandatory field check
-    public List<string> ValidateMandatoryFields(string id, string specimenIdentifier, string panelIdentifier)
+    public List<string> ValidateMandatoryFields(Dictionary<string, string> fields)
     {
         var errors = new List<string>();
 
-        if (string.IsNullOrWhiteSpace(id))
-            errors.Add("ID is required.");
-
-        if (string.IsNullOrWhiteSpace(specimenIdentifier))
-            errors.Add("Specimen Identifier is required.");
-
-        if (string.IsNullOrWhiteSpace(panelIdentifier))
-            errors.Add("Panel Identifier is required.");
+        foreach (var field in fields)
+        {
+            if (string.IsNullOrWhiteSpace(field.Value))
+            {
+                errors.Add($"{field.Key} is required.");
+            }
+        }
 
         return errors;
     }
@@ -48,7 +180,7 @@ public class LookupValidator
         }
 
         var inputStudies = csvStudies.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        var dbStudies = _context.Studies.Select(s => s.Name).ToList();
+        var dbStudies = _context.StudyType.Select(s => s.Name).ToList();
 
         foreach (var s in inputStudies)
         {
@@ -68,7 +200,7 @@ public class LookupValidator
             return errors;
         }
 
-        var dbSexes = _context.Sexes.Select(s => s.Value).ToList();
+        var dbSexes = new SexRepostitory().PopulateSex().Select(s => s.SexName);
         if (!dbSexes.Contains(sexValue, StringComparer.OrdinalIgnoreCase))
             errors.Add($"Invalid Sex: {sexValue}");
 
@@ -85,7 +217,7 @@ public class LookupValidator
         }
 
         var inputTypes = csvSampleTypes.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        var dbTypes = _context.SampleTypes.Select(s => s.Name).ToList();
+        var dbTypes = _context.SampleType.Select(s => s.SampleName).ToList();
 
         foreach (var t in inputTypes)
         {
@@ -95,66 +227,16 @@ public class LookupValidator
 
         return errors;
     }
-}
 
-var validator = new LookupValidator(_context);
-
-int rowNumber = 1;
-foreach (var row in parsedRows)
-{
-    var errors = new List<string>();
-
-    // 1. Mandatory checks
-    errors.AddRange(validator.ValidateMandatoryFields(row.ID, row.SpecimenIdentifier, row.PanelIdentifier));
-
-    // 2. Lookup checks
-    errors.AddRange(validator.ValidateStudy(row.Study));
-    errors.AddRange(validator.ValidateSex(row.Sex));
-    errors.AddRange(validator.ValidateSampleType(row.SampleType));
-
-    if (errors.Any())
+    public List<string> ValidateAge(int age)
     {
-        errorList.AddRange(errors.Select(e => $"Row {rowNumber}: {e}"));
-        rowNumber++;
-        continue; // Skip saving this invalid row
-    }
+        var errors = new List<string>();
 
-    // ✅ If valid, map to entity and save
-    var specimen = new Specimen
-    {
-        ID = int.Parse(row.ID), // safe here since it's already validated
-        SpecimenIdentifier = row.SpecimenIdentifier,
-        PanelIdentifier = row.PanelIdentifier,
-        Study = row.Study,
-        Sex = row.Sex,
-        SampleType = row.SampleType
-    };
-
-    _context.Specimens.Add(specimen);
-    rowNumber++;
-}
-await _context.SaveChangesAsync();
-
-public List<string> ValidateMandatoryFields(Dictionary<string, string> fields)
-{
-    var errors = new List<string>();
-
-    foreach (var field in fields)
-    {
-        if (string.IsNullOrWhiteSpace(field.Value))
+        if (age <= 0 || age >= 100)
         {
-            errors.Add($"{field.Key} is required.");
+            errors.Add($"Invalid Age: {age}");
         }
+
+        return errors;
     }
-
-    return errors;
 }
-var mandatoryFields = new Dictionary<string, string>
-{
-    { "ID", row.ID },
-    { "Specimen Identifier", row.SpecimenIdentifier },
-    { "Panel Identifier", row.PanelIdentifier }
-    // 👉 later just add more fields here, no need to change the validator
-};
-
-errors.AddRange(validator.ValidateMandatoryFields(mandatoryFields));
