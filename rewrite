@@ -1,0 +1,241 @@
+using CsvHelper;
+using System.Globalization;
+
+public List<SpecimenBulkUpdateModel> ProcessCsv(Stream fileStream, out ValidationResult validationResult)
+{
+    var specimens = new List<SpecimenBulkUpdateModel>();
+    validationResult = new ValidationResult();
+
+    using var reader = new StreamReader(fileStream);
+    using var csv = new CsvReader(reader, CultureInfo.InvariantCulture);
+
+    try
+    {
+        specimens = csv.GetRecords<SpecimenBulkUpdateModel>().ToList();
+    }
+    catch (Exception ex)
+    {
+        validationResult.IsValid = false;
+        validationResult.Errors.Add($"CSV parsing failed: {ex.Message}");
+    }
+
+    return specimens;
+}
+
+
+using Microsoft.VisualBasic.FileIO;
+
+public List<SpecimenBulkUpdateModel> ProcessCsv(Stream fileStream, out ValidationResult validationResult)
+{
+    var specimens = new List<SpecimenBulkUpdateModel>();
+    validationResult = new ValidationResult();
+
+    using var reader = new StreamReader(fileStream);
+    using var parser = new TextFieldParser(reader)
+    {
+        TextFieldType = FieldType.Delimited,
+        HasFieldsEnclosedInQuotes = true
+    };
+    parser.SetDelimiters(",");
+
+    if (parser.EndOfData)
+    {
+        validationResult.IsValid = false;
+        validationResult.Errors.Add("CSV is empty.");
+        return specimens;
+    }
+
+    // Read headers
+    var headers = parser.ReadFields();
+    if (headers == null || headers.Length == 0)
+    {
+        validationResult.IsValid = false;
+        validationResult.Errors.Add("Missing header row.");
+        return specimens;
+    }
+
+    var headerCheck = ValidateHeaders(headers);
+    if (!headerCheck.IsValid)
+    {
+        validationResult.IsValid = false;
+        validationResult.Errors.AddRange(headerCheck.Errors);
+        return specimens;
+    }
+
+    int rowIndex = 1;
+    while (!parser.EndOfData)
+    {
+        rowIndex++;
+        var values = parser.ReadFields();
+        if (values == null) continue;
+
+        var entity = new SpecimenBulkUpdateModel();
+
+        foreach (var column in SpecimenHeaders.ColumnTypes)
+        {
+            var colIndex = Array.FindIndex(headers, h => h.Equals(column.Key, StringComparison.OrdinalIgnoreCase));
+            if (colIndex == -1 || colIndex >= values.Length) continue;
+
+            var rawValue = values[colIndex];
+
+            try
+            {
+                var typedValue = ConvertValue(rawValue, column.Value);
+
+                if (_headerToProperty.TryGetValue(column.Key, out var propName))
+                {
+                    var prop = typeof(SpecimenBulkUpdateModel).GetProperty(propName);
+                    if (prop != null)
+                        prop.SetValue(entity, typedValue);
+                }
+            }
+            catch (Exception ex)
+            {
+                validationResult.IsValid = false;
+                validationResult.Errors.Add($"Row {rowIndex}, Column '{column.Key}': {ex.Message}");
+            }
+        }
+
+        specimens.Add(entity);
+    }
+
+    return specimens;
+}
+
+
+
+using Microsoft.VisualBasic.FileIO;
+using System.Globalization;
+
+public class CsvProcessor
+{
+    private readonly Dictionary<string, string> _headerToProperty = new()
+    {
+        { "ID", "ID" },
+        { "Specimen Identifier", "SpecimenIdentifier" },
+        { "Panel Identifier", "PanelIdentifier" },
+        { "Study", "Study" },
+        { "Sex", "Sex" },
+        { "Sample Type", "SampleType" },
+        { "Age", "Age" }
+        // 👉 Add other headers → property mappings here
+    };
+
+    public List<SpecimenBulkUpdateModel> ProcessCsv(Stream fileStream, out ValidationResult validationResult)
+    {
+        var specimens = new List<SpecimenBulkUpdateModel>();
+        validationResult = new ValidationResult();
+
+        using var reader = new StreamReader(fileStream);
+        using var parser = new TextFieldParser(reader)
+        {
+            TextFieldType = FieldType.Delimited,
+            HasFieldsEnclosedInQuotes = true
+        };
+        parser.SetDelimiters(",");
+
+        if (parser.EndOfData)
+        {
+            validationResult.IsValid = false;
+            validationResult.Errors.Add("CSV is empty.");
+            return specimens;
+        }
+
+        // ✅ Read headers
+        var headers = parser.ReadFields();
+        if (headers == null || headers.Length == 0)
+        {
+            validationResult.IsValid = false;
+            validationResult.Errors.Add("Missing header row.");
+            return specimens;
+        }
+
+        var headerCheck = ValidateHeaders(headers);
+        if (!headerCheck.IsValid)
+        {
+            validationResult.IsValid = false;
+            validationResult.Errors.AddRange(headerCheck.Errors);
+            return specimens;
+        }
+
+        // ✅ Read data rows
+        int rowIndex = 1;
+        while (!parser.EndOfData)
+        {
+            rowIndex++;
+            var values = parser.ReadFields();
+            if (values == null) continue;
+
+            var entity = new SpecimenBulkUpdateModel();
+
+            foreach (var column in SpecimenHeaders.ColumnTypes)
+            {
+                var colIndex = Array.FindIndex(headers, h => h.Equals(column.Key, StringComparison.OrdinalIgnoreCase));
+                if (colIndex == -1 || colIndex >= values.Length) continue;
+
+                var rawValue = values[colIndex];
+
+                try
+                {
+                    var typedValue = ConvertValue(rawValue, column.Value);
+
+                    if (_headerToProperty.TryGetValue(column.Key, out var propName))
+                    {
+                        var prop = typeof(SpecimenBulkUpdateModel).GetProperty(propName);
+                        if (prop != null)
+                            prop.SetValue(entity, typedValue);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    validationResult.IsValid = false;
+                    validationResult.Errors.Add($"Row {rowIndex}, Column '{column.Key}': {ex.Message}");
+                }
+            }
+
+            specimens.Add(entity);
+        }
+
+        return specimens;
+    }
+
+    private ValidationResult ValidateHeaders(string[] headers)
+    {
+        var result = new ValidationResult { IsValid = true };
+
+        foreach (var required in SpecimenHeaders.RequiredHeaders)
+        {
+            if (!headers.Contains(required, StringComparer.OrdinalIgnoreCase))
+            {
+                result.IsValid = false;
+                result.Errors.Add($"Missing required header: {required}");
+            }
+        }
+
+        return result;
+    }
+
+    private object ConvertValue(string value, Type targetType)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return targetType == typeof(string) ? string.Empty : Activator.CreateInstance(targetType);
+
+        try
+        {
+            if (targetType == typeof(int))
+                return int.Parse(value, CultureInfo.InvariantCulture);
+
+            if (targetType == typeof(decimal))
+                return decimal.Parse(value, CultureInfo.InvariantCulture);
+
+            if (targetType == typeof(DateTime))
+                return DateTime.Parse(value, CultureInfo.InvariantCulture);
+
+            return value;
+        }
+        catch
+        {
+            throw new Exception($"Value '{value}' is not valid for type {targetType.Name}");
+        }
+    }
+}
