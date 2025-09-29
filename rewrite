@@ -1,211 +1,172 @@
-using CsvHelper;
-using System.Globalization;
-
-public List<SpecimenBulkUpdateModel> ProcessCsv(Stream fileStream, out ValidationResult validationResult)
-{
-    var specimens = new List<SpecimenBulkUpdateModel>();
-    validationResult = new ValidationResult();
-
-    using var reader = new StreamReader(fileStream);
-    using var csv = new CsvReader(reader, CultureInfo.InvariantCulture);
-
-    try
-    {
-        specimens = csv.GetRecords<SpecimenBulkUpdateModel>().ToList();
-    }
-    catch (Exception ex)
-    {
-        validationResult.IsValid = false;
-        validationResult.Errors.Add($"CSV parsing failed: {ex.Message}");
-    }
-
-    return specimens;
+@{
+    ViewData["Title"] = "Upload Specimen CSV/Excel";
+    var successMessage = ViewBag.SuccessMessage as string;
+    var errorCount = TempData["ErrorCount"] as int?;
 }
 
+<h2>Upload Specimen Data</h2>
 
-using Microsoft.VisualBasic.FileIO;
-
-public List<SpecimenBulkUpdateModel> ProcessCsv(Stream fileStream, out ValidationResult validationResult)
+@if (!string.IsNullOrEmpty(successMessage))
 {
-    var specimens = new List<SpecimenBulkUpdateModel>();
-    validationResult = new ValidationResult();
-
-    using var reader = new StreamReader(fileStream);
-    using var parser = new TextFieldParser(reader)
-    {
-        TextFieldType = FieldType.Delimited,
-        HasFieldsEnclosedInQuotes = true
-    };
-    parser.SetDelimiters(",");
-
-    if (parser.EndOfData)
-    {
-        validationResult.IsValid = false;
-        validationResult.Errors.Add("CSV is empty.");
-        return specimens;
-    }
-
-    // Read headers
-    var headers = parser.ReadFields();
-    if (headers == null || headers.Length == 0)
-    {
-        validationResult.IsValid = false;
-        validationResult.Errors.Add("Missing header row.");
-        return specimens;
-    }
-
-    var headerCheck = ValidateHeaders(headers);
-    if (!headerCheck.IsValid)
-    {
-        validationResult.IsValid = false;
-        validationResult.Errors.AddRange(headerCheck.Errors);
-        return specimens;
-    }
-
-    int rowIndex = 1;
-    while (!parser.EndOfData)
-    {
-        rowIndex++;
-        var values = parser.ReadFields();
-        if (values == null) continue;
-
-        var entity = new SpecimenBulkUpdateModel();
-
-        foreach (var column in SpecimenHeaders.ColumnTypes)
-        {
-            var colIndex = Array.FindIndex(headers, h => h.Equals(column.Key, StringComparison.OrdinalIgnoreCase));
-            if (colIndex == -1 || colIndex >= values.Length) continue;
-
-            var rawValue = values[colIndex];
-
-            try
-            {
-                var typedValue = ConvertValue(rawValue, column.Value);
-
-                if (_headerToProperty.TryGetValue(column.Key, out var propName))
-                {
-                    var prop = typeof(SpecimenBulkUpdateModel).GetProperty(propName);
-                    if (prop != null)
-                        prop.SetValue(entity, typedValue);
-                }
-            }
-            catch (Exception ex)
-            {
-                validationResult.IsValid = false;
-                validationResult.Errors.Add($"Row {rowIndex}, Column '{column.Key}': {ex.Message}");
-            }
-        }
-
-        specimens.Add(entity);
-    }
-
-    return specimens;
+    <div style="color:green; margin-bottom:10px;">
+        <strong>@successMessage</strong>
+    </div>
 }
 
-
-
-using Microsoft.VisualBasic.FileIO;
-using System.Globalization;
-
-public class CsvProcessor
+@if (errorCount.HasValue && errorCount > 0)
 {
-    private readonly Dictionary<string, string> _headerToProperty = new()
+    <div style="color:red; margin-bottom:10px;">
+        <strong>@errorCount errors found.</strong><br />
+        <a asp-action="DownloadErrors" class="btn btn-danger">Download Error Report</a>
+    </div>
+}
+
+<form asp-action="Upload" asp-controller="SpecimenUpload" method="post" enctype="multipart/form-data">
+    <div>
+        <input type="file" name="file" required />
+    </div>
+    <br />
+    <button type="submit" class="btn btn-primary">Upload</button>
+</form>
+public class SpecimenUploadController : Controller
+{
+    private readonly ApplicationDbContext _context;
+
+    public SpecimenUploadController(ApplicationDbContext context)
     {
-        { "ID", "ID" },
-        { "Specimen Identifier", "SpecimenIdentifier" },
-        { "Panel Identifier", "PanelIdentifier" },
-        { "Study", "Study" },
-        { "Sex", "Sex" },
-        { "Sample Type", "SampleType" },
-        { "Age", "Age" }
-        // 👉 Add other headers → property mappings here
-    };
+        _context = context;
+    }
 
-    public List<SpecimenBulkUpdateModel> ProcessCsv(Stream fileStream, out ValidationResult validationResult)
+    [HttpGet]
+    public IActionResult Index()
     {
-        var specimens = new List<SpecimenBulkUpdateModel>();
-        validationResult = new ValidationResult();
+        return View();
+    }
 
-        using var reader = new StreamReader(fileStream);
-        using var parser = new TextFieldParser(reader)
+    [HttpPost]
+    public IActionResult Upload(IFormFile file)
+    {
+        if (file == null || file.Length == 0)
         {
-            TextFieldType = FieldType.Delimited,
-            HasFieldsEnclosedInQuotes = true
-        };
-        parser.SetDelimiters(",");
-
-        if (parser.EndOfData)
-        {
-            validationResult.IsValid = false;
-            validationResult.Errors.Add("CSV is empty.");
-            return specimens;
+            TempData["Errors"] = "No file uploaded.";
+            TempData["ErrorCount"] = 1;
+            return RedirectToAction("Index");
         }
 
-        // ✅ Read headers
-        var headers = parser.ReadFields();
-        if (headers == null || headers.Length == 0)
+        using var stream = file.OpenReadStream();
+        var processor = new FileProcessor();
+        var table = processor.ReadFileToDataTable(stream, file.FileName, out var validation);
+
+        if (!validation.IsValid)
         {
-            validationResult.IsValid = false;
-            validationResult.Errors.Add("Missing header row.");
-            return specimens;
+            TempData["Errors"] = string.Join(Environment.NewLine, validation.Errors);
+            TempData["ErrorCount"] = validation.Errors.Count;
+            return RedirectToAction("Index");
         }
 
-        var headerCheck = ValidateHeaders(headers);
+        // ✅ Validate headers
+        var headerCheck = processor.ValidateHeaders(table);
         if (!headerCheck.IsValid)
         {
-            validationResult.IsValid = false;
-            validationResult.Errors.AddRange(headerCheck.Errors);
-            return specimens;
+            TempData["Errors"] = string.Join(Environment.NewLine, headerCheck.Errors);
+            TempData["ErrorCount"] = headerCheck.Errors.Count;
+            return RedirectToAction("Index");
         }
 
-        // ✅ Read data rows
-        int rowIndex = 1;
-        while (!parser.EndOfData)
+        var validator = new LookupValidator(_context);
+        var specimens = processor.ParseDataTable(table, validator, out var errors);
+
+        if (errors.Any())
         {
-            rowIndex++;
-            var values = parser.ReadFields();
-            if (values == null) continue;
-
-            var entity = new SpecimenBulkUpdateModel();
-
-            foreach (var column in SpecimenHeaders.ColumnTypes)
-            {
-                var colIndex = Array.FindIndex(headers, h => h.Equals(column.Key, StringComparison.OrdinalIgnoreCase));
-                if (colIndex == -1 || colIndex >= values.Length) continue;
-
-                var rawValue = values[colIndex];
-
-                try
-                {
-                    var typedValue = ConvertValue(rawValue, column.Value);
-
-                    if (_headerToProperty.TryGetValue(column.Key, out var propName))
-                    {
-                        var prop = typeof(SpecimenBulkUpdateModel).GetProperty(propName);
-                        if (prop != null)
-                            prop.SetValue(entity, typedValue);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    validationResult.IsValid = false;
-                    validationResult.Errors.Add($"Row {rowIndex}, Column '{column.Key}': {ex.Message}");
-                }
-            }
-
-            specimens.Add(entity);
+            TempData["Errors"] = string.Join(Environment.NewLine, errors);
+            TempData["ErrorCount"] = errors.Count;
+            return RedirectToAction("Index");
         }
 
-        return specimens;
+        // ✅ Save valid rows
+        _context.Specimen.AddRange(specimens);
+        _context.SaveChanges();
+
+        ViewBag.SuccessMessage = $"{specimens.Count} records processed and saved.";
+        return View("Index");
     }
 
-    private ValidationResult ValidateHeaders(string[] headers)
+    [HttpGet]
+    public IActionResult DownloadErrors()
     {
-        var result = new ValidationResult { IsValid = true };
+        if (!TempData.ContainsKey("Errors"))
+            return RedirectToAction("Index");
+
+        var errorText = TempData["Errors"].ToString();
+        var bytes = System.Text.Encoding.UTF8.GetBytes(errorText ?? "");
+        var fileName = $"UploadErrors_{DateTime.Now:yyyyMMdd_HHmmss}.txt";
+
+        return File(bytes, "text/plain", fileName);
+    }
+}
+using ExcelDataReader;
+using System.Data;
+
+public class FileProcessor
+{
+    public DataTable ReadFileToDataTable(Stream fileStream, string fileName, out ValidationResult validationResult)
+    {
+        validationResult = new ValidationResult();
+        System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+
+        var dataSetConfig = new ExcelDataSetConfiguration
+        {
+            ConfigureDataTable = _ => new ExcelDataTableConfiguration
+            {
+                UseHeaderRow = true // ✅ Treat first row as headers
+            }
+        };
+
+        try
+        {
+            IExcelDataReader reader;
+
+            if (fileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase))
+                reader = ExcelReaderFactory.CreateCsvReader(fileStream);
+            else if (fileName.EndsWith(".xls", StringComparison.OrdinalIgnoreCase) ||
+                     fileName.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase))
+                reader = ExcelReaderFactory.CreateReader(fileStream);
+            else
+            {
+                validationResult.IsValid = false;
+                validationResult.Errors.Add("Unsupported file format. Please upload CSV or Excel.");
+                return new DataTable();
+            }
+
+            using (reader)
+            {
+                var result = reader.AsDataSet(dataSetConfig);
+
+                if (result.Tables.Count == 0 || result.Tables[0].Rows.Count == 0)
+                {
+                    validationResult.IsValid = false;
+                    validationResult.Errors.Add("File is empty or has no readable data.");
+                    return new DataTable();
+                }
+
+                return result.Tables[0];
+            }
+        }
+        catch (Exception ex)
+        {
+            validationResult.IsValid = false;
+            validationResult.Errors.Add($"File read failed: {ex.Message}");
+            return new DataTable();
+        }
+    }
+
+    public ValidationResult ValidateHeaders(DataTable table)
+    {
+        var result = new ValidationResult();
 
         foreach (var required in SpecimenHeaders.RequiredHeaders)
         {
-            if (!headers.Contains(required, StringComparer.OrdinalIgnoreCase))
+            if (!table.Columns.Contains(required))
             {
                 result.IsValid = false;
                 result.Errors.Add($"Missing required header: {required}");
@@ -215,27 +176,75 @@ public class CsvProcessor
         return result;
     }
 
-    private object ConvertValue(string value, Type targetType)
+    public List<Specimen> ParseDataTable(DataTable table, LookupValidator validator, out List<string> errorList)
     {
-        if (string.IsNullOrWhiteSpace(value))
-            return targetType == typeof(string) ? string.Empty : Activator.CreateInstance(targetType);
+        var specimens = new List<Specimen>();
+        errorList = new List<string>();
 
-        try
+        int rowNumber = 1;
+        foreach (DataRow dr in table.Rows)
         {
-            if (targetType == typeof(int))
-                return int.Parse(value, CultureInfo.InvariantCulture);
+            var errors = new List<string>();
 
-            if (targetType == typeof(decimal))
-                return decimal.Parse(value, CultureInfo.InvariantCulture);
+            // Mandatory fields
+            var mandatoryFields = new Dictionary<string, string>
+            {
+                { "ID", dr["ID"]?.ToString() ?? string.Empty },
+                { "Specimen Identifier", dr["Specimen Identifier"]?.ToString() ?? string.Empty },
+                { "Panel Identifier", dr["Panel Identifier"]?.ToString() ?? string.Empty }
+            };
+            errors.AddRange(validator.ValidateMandatoryFields(mandatoryFields));
 
-            if (targetType == typeof(DateTime))
-                return DateTime.Parse(value, CultureInfo.InvariantCulture);
+            // DB Lookups
+            errors.AddRange(validator.ValidateStudy(dr["Study"]?.ToString() ?? string.Empty));
+            errors.AddRange(validator.ValidateSex(dr["Sex"]?.ToString() ?? string.Empty));
+            errors.AddRange(validator.ValidateSampleType(dr["Sample Type"]?.ToString() ?? string.Empty));
 
-            return value;
+            // Age validation
+            if (int.TryParse(dr["Age"]?.ToString(), out var age))
+                errors.AddRange(validator.ValidateAge(age));
+            else
+                errors.Add("Invalid Age format.");
+
+            if (errors.Any())
+            {
+                errorList.AddRange(errors.Select(e => $"Row {rowNumber}: {e}"));
+            }
+            else
+            {
+                specimens.Add(new Specimen
+                {
+                    ID = Convert.ToInt32(dr["ID"]),
+                    SpecimenIdentifier = dr["Specimen Identifier"].ToString(),
+                    PanelIdentifier = dr["Panel Identifier"].ToString(),
+                    StudyCodeName = dr["Study"].ToString(),
+                    Sex = dr["Sex"].ToString(),
+                    SampleTypeCode = dr["Sample Type"].ToString(),
+                    Age = age
+                });
+            }
+
+            rowNumber++;
         }
-        catch
-        {
-            throw new Exception($"Value '{value}' is not valid for type {targetType.Name}");
-        }
+
+        return specimens;
     }
+}
+public class ValidationResult
+{
+    public bool IsValid { get; set; } = true;
+    public List<string> Errors { get; set; } = new();
+}
+public static class SpecimenHeaders
+{
+    public static readonly List<string> RequiredHeaders = new()
+    {
+        "ID",
+        "Specimen Identifier",
+        "Panel Identifier",
+        "Study",
+        "Sex",
+        "Sample Type",
+        "Age"
+    };
 }
