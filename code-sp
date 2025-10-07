@@ -1,36 +1,223 @@
-public List<string> ValidateColumnLengths(DataRow dr, Dictionary<string, int> columnMaxLengths)
+ID = specimenID,
+PanelID = panelID,
+SpecimenIdentifier = dr["Specimen Identifier"].ToString(),
+StudyCodeName = dr["Study"].ToString(),
+DeidentifiedPatientId = dr["Deidentified Patient Id"].ToString(),
+PlasmaVolume = Convert.ToDecimal(dr["Total Specimen Volume"]?.ToString()),
+NumberOfAliquot = !string.IsNullOrEmpty(dr["# of Aliquots"].ToString()) ? Convert.ToInt32(dr["# of Aliquots"]) : null,
+SampleTypeCode = dr["Sample Type"].ToString(),
+PlasmaBoxNumber = dr["Box Number"].ToString(),
+BoxSortNumber = dr["Box Sort Number"].ToString(),
+SortNumber = !string.IsNullOrEmpty(dr["Sort Number"].ToString()) ? Convert.ToDecimal(dr["Sort Number"].ToString()) : null,
+WholeBloodAliquot = dr["Whole Blood Aliquot"].ToString(),
+WholeBloodBoxNumber = dr["Whole Blood Box Number"].ToString(),
+DispositionStatus = dr["Status"].ToString(),
+SpecimenComment = dr["Comment"].ToString(),
+Site = dr["Collection Site"].ToString(),
+City = dr["City"].ToString(),
+SpecimenCountry = _context.Country.FirstOrDefault(c => c.Name == dr["Country"].ToString()).Code,
+DrawDate = Convert.ToDateTime(dr["Collection Date"].ToString()),
+Sex = !string.IsNullOrEmpty(dr["Sex"].ToString()) ? sexList.FirstOrDefault(s => s.Name == dr["Sex"].ToString()).ID : null,
+Age = Convert.ToInt32(dr["Age"]?.ToString()),
+Clinic = dr["Clinic Type"].ToString(),
+StudyTypeID = _context.StudyType.Where(s => s.Name == dr["Study"]).FirstOrDefault().ID
+
+using Microsoft.EntityFrameworkCore;
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
+
+namespace IDDA.Domain.Entities
 {
-    var errors = new List<string>();
-
-    foreach (var rule in columnMaxLengths)
+    public class Specimen : Auditable
     {
-        var colName = rule.Key;
-        var maxLength = rule.Value;
+        #region Properties
 
-        if (!dr.Table.Columns.Contains(colName))
-            continue;
+        [Key]
+        [Column("SPECIMEN_ID")]
+        [DisplayName("ID")]
+        public int? ID { get; set; }
 
-        var value = dr[colName]?.ToString();
-        if (!string.IsNullOrWhiteSpace(value) && value.Length > maxLength)
-        {
-            errors.Add($"{colName} exceeds maximum allowed length ({maxLength}). Provided length: {value.Length}");
-        }
+        [Required(ErrorMessage = "Specimen Identifier is required")]
+        [MaxLength(200)]
+        [Column("SPECIMEN_IDENTIFIER")]
+        [DisplayName("Specimen Identifier")]
+        public string SpecimenIdentifier { get; set; }
+
+        [Range(0.0, 999)]
+        [Column("AGE")]
+        [DisplayName("Age")]
+		[Precision(4, 1)]
+		// [RegularExpression("^[1-4](\\.\\d{1,2})?$", ErrorMessage = "Age accepts upto 4 digits and 1 decimals")]
+		public decimal? Age { get; set; }
+
+        [MaxLength(200)]
+        [Column("CLINIC")]
+        [DisplayName("Clinic Type")]
+        public string? Clinic { get; set; }
+
+        [MaxLength(20)]
+        [Column("DISPOSITION_STATUS")]
+        [DisplayName("Status")]
+        public string? DispositionStatus { get; set; }
+
+        [Column("DRAW_DATE")]
+        [DisplayName("Collection Date")]
+        [DisplayFormat(DataFormatString = "{0:MM/dd/yyyy}")]
+        public DateTime? DrawDate { get; set; }
+
+        [MaxLength(25)]
+        [Column("PLASMA_BOX_NBR")]
+        [DisplayName("Box Number")]
+        public string? PlasmaBoxNumber { get; set; }        
+
+        [MaxLength(50)]
+        [Column("STUDY_CODE")]
+        [DisplayName("Study")]
+        public string? StudyCode { get; set; }
+        
+         [MaxLength(100)]
+        [Column("DEIDENTIFIED_PATIENT_ID")]
+        [DisplayName("Deidentified Patient ID")]
+        public string? DeidentifiedPatientId { get; set; }
+
+        [MaxLength(100)]
+        [Column("CITY")]
+        [DisplayName("City")]
+        public string? City { get; set; }
+
+        // [Required(ErrorMessage = "Specimen Plasma Volume is required")]
+        [Range(0.1, 999, ErrorMessage = "Specimen Plasma Volume must be between 0 to 999")]
+        [Precision(5, 2)]
+        [Column("PLASMA_VOLUME")]
+        [DisplayFormat(ApplyFormatInEditMode = true)]
+        [DisplayName("Total Specimen Volume")]
+        public decimal? PlasmaVolume { get; set; }
+
+        [MaxLength(1)]
+        [Column("SEX")]
+        [DisplayName("Sex")]
+        public string? Sex { get; set; }
+
+        [MaxLength(200)]
+        [Column("SITE")]
+        [DisplayName("Collection Site")]
+        public string? Site { get; set; }
+
+        [Range(0, 9999999)]
+        [Column("SORT_NUMBER")]
+        [DisplayName("Sort Number")]
+		[Precision(9, 2)]
+		//[RegularExpression("^[1-9](\\.\\d{1,2})?$", ErrorMessage = "Sort number accepts upto 9 digits and 2 decimals")]
+		public decimal? SortNumber { get; set; }
+
+        [MaxLength(2000)]
+        [Column("SPECIMEN_COMMENT")]
+        [DisplayName("Comment")]
+        public string? SpecimenComment { get; set; }
+
+        [MaxLength(2)]
+        [Column("SPECIMEN_COUNTRY")]
+        [DisplayName("Country")]
+        public string? SpecimenCountry { get; set; }
+
+        [MaxLength(1)]
+        [Column("WHOLE_BLOOD_ALIQUOT")]
+        [DisplayName("Whole Blood Aliquot")]
+        public string? WholeBloodAliquot { get; set; }
+
+        [MaxLength(10)]
+        [Column("WHOLE_BLOOD_BOX_NBR")]
+        [DisplayName("Whole Blood Box Number")]
+        public string? WholeBloodBoxNumber { get; set; }
+
+        [Required(ErrorMessage = "Panel Identifier is required")]
+        [Column("PANEL_ID")]
+        [DisplayName("Panel ID")]
+        public int? PanelID { get; set; }
+
+        [Range(0, 999999999)]
+        [Column("NUMBER_OF_ALIQUOTS")]
+        [DisplayName("# of Aliquots")]
+        public int? NumberOfAliquot { get; set; }
+
+        [MaxLength(2000)]
+        [Column("SAMPLE_TYPE_CODE")]
+        [DisplayName("Sample Type Code")]
+        public string? SampleTypeCode { get; set; }
+
+        [MaxLength(10)]
+        [Column("BOX_SORT_NUMBER")]
+        [DisplayName("Box Sort Number")]
+        public string? BoxSortNumber { get; set; }
+
+        [Column("DELETED")]
+        [DisplayName("DELETED")]
+        public bool? Deleted { get; set; }
+
+        [Column("SEQUENCE_COUNT")]
+        [DisplayName("Sequence Count")]
+        public int? SequenceCount { get; set; }
+
+        [MaxLength(255)]
+        [Column("SEQUENCE_DISPLAY_TEXT")]
+        [DisplayName("Sequence")]
+        public string? SequenceDisplayText { get; set; }
+
+        [Column("SPECIMEN_TEST_RUN_COUNT")]
+        [DisplayName("Speciment Test Run Count")]
+        public int? SpecimenTestRunCount { get; set; }
+
+        [MaxLength(255)]
+        [Column("SPECIMEN_TEST_RUN_DISPLAY_TEXT")]
+        [DisplayName("Specimen Test Runs")]
+        public string? SpecimenTestRunDisplayText { get; set; }
+
+        [Column("FREEZER_ITEM_COUNT")]
+        [DisplayName("Freezer Item Count")]
+        public int? FreezerItemCount { get; set; }
+
+        [MaxLength(255)]
+        [Column("FREEZER_ITEM_DISPLAY_TEXT")]
+        [DisplayName("Freezer Item")]
+        public string? FreezerItemDisplayText { get; set; }
+
+        [NotMapped]
+		[DisplayName("Panel")]
+		public string? PanelIdentifier { get; set; }
+
+        [NotMapped]
+        [DisplayName("Country")]
+        public string? CountryName { get; set; }
+
+        [NotMapped]
+        [DisplayName("Study Name")]
+        public string? StudyCodeName { get; set; }
+
+        [DisplayName("Whole Blood Aliquot")]
+        [NotMapped]
+        public string? WholeBloodAliquotDisplayName { get; set; }
+
+        [DisplayName("Sex")]
+        [NotMapped]
+        public string? SexDisplayName { get; set; }
+
+		[Column("STUDY_TYPE_ID")]
+		[DisplayName("Study Type")]
+		public int? StudyTypeID { get; set; }
+
+        [NotMapped]
+        public bool ISChecked { get; set; } = false;
+        
+        #endregion
+
+		#region Constructor
+
+		public Specimen() { }
+
+        #endregion
+
     }
 
-    return errors;
-}
 
-public static class SpecimenColumnRules
-{
-    // Define maximum allowed lengths for string columns
-    public static readonly Dictionary<string, int> ColumnMaxLengths = new()
-    {
-        { "Specimen Identifier", 50 },
-        { "Panel Identifier", 50 },
-        { "Study", 100 },
-        { "Sex", 10 },
-        { "Sample Type", 50 }
-        // Add more columns as needed
-    };
 }
-        errors.AddRange(validator.ValidateColumnLengths(dr, SpecimenColumnRules.ColumnMaxLengths));
