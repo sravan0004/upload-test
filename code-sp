@@ -1,150 +1,36 @@
-@model IDDA.Web.ViewModels.UploadViewModel
-@using IDDA.Domain.Helpers
-@{
-    ViewData["Title"] = @Constants.ModuleName.SpecimenBulkUpdate;
-    Layout = "~/Views/Shared/_Layout.cshtml";
-
-    var successMessage = ViewBag.SuccessMessage as string;
-    var errorCount = TempData["ErrorCount"] as int?;
-}
-
-<div class="container mt-4">
-    <div class="card shadow-sm">
-        <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
-            <h5 class="mb-0">Upload Specimen Data</h5>
-        </div>
-        <div class="card-body">
-
-            @* ✅ Success Message *@
-            @if (!string.IsNullOrEmpty(successMessage))
-            {
-                <div class="alert alert-success" role="alert">
-                    <i class="fas fa-check-circle me-1"></i> @successMessage
-                </div>
-            }
-
-            @* ✅ Error Summary *@
-            @if (errorCount.HasValue && errorCount > 0)
-            {
-                <div class="alert alert-danger d-flex justify-content-between align-items-center" role="alert">
-                    <div>
-                        <i class="fas fa-exclamation-triangle me-2"></i>
-                        <strong>@errorCount errors found.</strong> You can download the detailed error file below.
-                    </div>
-                    <form asp-action="DownloadErrors" asp-controller="SpecimenBulkUpdate" method="get" class="m-0">
-                        <button type="submit" class="btn btn-danger btn-sm">
-                            <i class="fas fa-file-download me-1"></i> Download Error(s) File
-                        </button>
-                    </form>
-                </div>
-            }
-
-            @* ✅ Upload Form *@
-            @using (Html.BeginForm("Upload", "SpecimenBulkUpdate", FormMethod.Post, new { enctype = "multipart/form-data", @class = "needs-validation" }))
-            {
-                <div class="mb-3">
-                    @Html.LabelFor(m => m.File, "Select CSV or Excel file", new { @class = "form-label fw-bold" })
-                    <div class="input-group">
-                        @Html.TextBoxFor(m => m.File, new { type = "file", @class = "form-control", accept = ".csv,.xls,.xlsx" })
-                    </div>
-                    @Html.ValidationMessageFor(m => m.File, "", new { @class = "text-danger" })
-                </div>
-
-                <div class="text-end">
-                    <button type="submit" class="btn btn-primary">
-                        <i class="fas fa-upload me-1"></i> Upload
-                    </button>
-                </div>
-            }
-        </div>
-    </div>
-</div>
-
-@section Scripts {
-    <script src="~/lib/jquery/dist/jquery.min.js"></script>
-    <script src="~/lib/bootstrap/dist/js/bootstrap.bundle.min.js"></script>
-    <partial name="_ValidationScriptsPartial" />
-}
-
-
-private IActionResult HandleErrors(IEnumerable<string> errors)
+public List<string> ValidateColumnLengths(DataRow dr, Dictionary<string, int> columnMaxLengths)
 {
-    var errorList = errors?.ToList() ?? new List<string>();
+    var errors = new List<string>();
 
-    TempData["Errors"] = string.Join(Environment.NewLine, errorList);
-    TempData["ErrorCount"] = errorList.Count;
-
-    return RedirectToAction("Index");
-}
-
-private IActionResult HandleSingleError(string message)
-{
-    TempData["Errors"] = message;
-    TempData["ErrorCount"] = 1;
-
-    return RedirectToAction("Index");
-}
-
-[HttpPost]
-public async Task<IActionResult> Upload(UploadViewModel model)
-{
-    if (!ModelState.IsValid)
+    foreach (var rule in columnMaxLengths)
     {
-        var modelErrors = ModelState.Values
-            .SelectMany(v => v.Errors)
-            .Select(e => e.ErrorMessage);
-        return HandleErrors(modelErrors);
-    }
+        var colName = rule.Key;
+        var maxLength = rule.Value;
 
-    var file = HttpContext.Request.Form.Files.FirstOrDefault();
-    if (file == null || file.Length == 0)
-        return HandleSingleError("No file uploaded.");
+        if (!dr.Table.Columns.Contains(colName))
+            continue;
 
-    if (!file.FileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase) &&
-        !file.FileName.EndsWith(".xls", StringComparison.OrdinalIgnoreCase) &&
-        !file.FileName.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase))
-        return HandleSingleError("Invalid file format. Please upload a CSV or Excel file.");
-
-    using var stream = file.OpenReadStream();
-    var processor = new FileProcessor(_context);
-
-    // 1️⃣ Convert to DataTable
-    var validationResult = processor.ReadFileToDataTable(stream, file.FileName);
-    if (!validationResult.IsValid)
-        return HandleErrors(validationResult.Errors);
-
-    // 2️⃣ Validate Headers
-    var headerCheck = processor.ValidateHeaders(validationResult.Specimens);
-    if (!headerCheck.IsValid)
-        return HandleErrors(headerCheck.Errors);
-
-    // 3️⃣ Validate & Prepare Specimens
-    var validator = new LookupValidator(_context);
-    var specimens = processor.ParseDataTable(validationResult.Specimens, validator, out var validationErrors);
-
-    if (validationErrors.Any())
-        return HandleErrors(validationErrors);
-
-    // 4️⃣ All-or-nothing Transaction
-    using var transaction = await _context.Database.BeginTransactionAsync();
-    try
-    {
-        var specimenRepository = new SpecimenRepository(_context);
-        var dbResult = await specimenRepository.BulkUploadUpdateSpecimenAsyn(specimens);
-
-        if (dbResult.Count > 0)
+        var value = dr[colName]?.ToString();
+        if (!string.IsNullOrWhiteSpace(value) && value.Length > maxLength)
         {
-            await transaction.RollbackAsync();
-            return HandleErrors(dbResult);
+            errors.Add($"{colName} exceeds maximum allowed length ({maxLength}). Provided length: {value.Length}");
         }
+    }
 
-        await transaction.CommitAsync();
-        ViewBag.SuccessMessage = $"{specimens.Count} records processed and saved successfully.";
-        return View("Index");
-    }
-    catch (Exception ex)
-    {
-        await transaction.RollbackAsync();
-        return HandleSingleError($"Transaction failed: {ex.Message}");
-    }
+    return errors;
 }
+
+public static class SpecimenColumnRules
+{
+    // Define maximum allowed lengths for string columns
+    public static readonly Dictionary<string, int> ColumnMaxLengths = new()
+    {
+        { "Specimen Identifier", 50 },
+        { "Panel Identifier", 50 },
+        { "Study", 100 },
+        { "Sex", 10 },
+        { "Sample Type", 50 }
+        // Add more columns as needed
+    };
+}
+        errors.AddRange(validator.ValidateColumnLengths(dr, SpecimenColumnRules.ColumnMaxLengths));
