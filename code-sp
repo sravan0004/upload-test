@@ -1,151 +1,150 @@
 @model IDDA.Web.ViewModels.UploadViewModel
 @using IDDA.Domain.Helpers
 @{
-	ViewData["Title"] = @Constants.ModuleName.SpecimenBulkUpdate;
-	Layout = "~/Views/Shared/_Layout.cshtml";
+    ViewData["Title"] = @Constants.ModuleName.SpecimenBulkUpdate;
+    Layout = "~/Views/Shared/_Layout.cshtml";
 
     var successMessage = ViewBag.SuccessMessage as string;
     var errorCount = TempData["ErrorCount"] as int?;
 }
 
-<h2>Upload Specimen Data</h2>
-
-@if (!string.IsNullOrEmpty(successMessage))
-{
-    <div style="color:green; margin-bottom:10px;">
-        <strong>@successMessage</strong>
-    </div>
-}
-
-
-
-@using (Html.BeginForm("Upload", "SpecimenBulkUpdate", FormMethod.Post, new { enctype = "multipart/form-data" }))
-{
-    @Html.LabelFor(m => m.File)
-    @Html.TextBoxFor(m => m.File, new { type = "file" })
-    @Html.ValidationMessageFor(m => m.File)
-
-    <button type="submit">Upload</button>
-
-    @if (errorCount.HasValue && errorCount > 0)
-    {
-        <div style="color:red; margin-bottom:10px;">
-            <strong>@errorCount errors found.</strong><br />
-            @* <a asp-action="DownloadErrors" class="btn btn-danger" >Download Error(s) File</a> *@
-            <button id="exportButton" type="submit" class="btn btn-danger" title="Click to export" formaction="/SpecimenBulkUpdate/DownloadErrors">
-                <i class="fas fa-file-export fa-lg"></i> Download Error(s) File
-            </button>
+<div class="container mt-4">
+    <div class="card shadow-sm">
+        <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
+            <h5 class="mb-0">Upload Specimen Data</h5>
         </div>
-    }
-}
+        <div class="card-body">
 
+            @* ✅ Success Message *@
+            @if (!string.IsNullOrEmpty(successMessage))
+            {
+                <div class="alert alert-success" role="alert">
+                    <i class="fas fa-check-circle me-1"></i> @successMessage
+                </div>
+            }
+
+            @* ✅ Error Summary *@
+            @if (errorCount.HasValue && errorCount > 0)
+            {
+                <div class="alert alert-danger d-flex justify-content-between align-items-center" role="alert">
+                    <div>
+                        <i class="fas fa-exclamation-triangle me-2"></i>
+                        <strong>@errorCount errors found.</strong> You can download the detailed error file below.
+                    </div>
+                    <form asp-action="DownloadErrors" asp-controller="SpecimenBulkUpdate" method="get" class="m-0">
+                        <button type="submit" class="btn btn-danger btn-sm">
+                            <i class="fas fa-file-download me-1"></i> Download Error(s) File
+                        </button>
+                    </form>
+                </div>
+            }
+
+            @* ✅ Upload Form *@
+            @using (Html.BeginForm("Upload", "SpecimenBulkUpdate", FormMethod.Post, new { enctype = "multipart/form-data", @class = "needs-validation" }))
+            {
+                <div class="mb-3">
+                    @Html.LabelFor(m => m.File, "Select CSV or Excel file", new { @class = "form-label fw-bold" })
+                    <div class="input-group">
+                        @Html.TextBoxFor(m => m.File, new { type = "file", @class = "form-control", accept = ".csv,.xls,.xlsx" })
+                    </div>
+                    @Html.ValidationMessageFor(m => m.File, "", new { @class = "text-danger" })
+                </div>
+
+                <div class="text-end">
+                    <button type="submit" class="btn btn-primary">
+                        <i class="fas fa-upload me-1"></i> Upload
+                    </button>
+                </div>
+            }
+        </div>
+    </div>
+</div>
 
 @section Scripts {
-	@{
-		<script src="~/js/custom-script/specimen-bulk-update.js"></script>
-		<script src="~/js/custom-script/jquery-toast-alert.js"></script>
-        <partial name="_ValidationScriptsPartial" />
-    }
+    <script src="~/lib/jquery/dist/jquery.min.js"></script>
+    <script src="~/lib/bootstrap/dist/js/bootstrap.bundle.min.js"></script>
+    <partial name="_ValidationScriptsPartial" />
 }
 
+
+private IActionResult HandleErrors(IEnumerable<string> errors)
+{
+    var errorList = errors?.ToList() ?? new List<string>();
+
+    TempData["Errors"] = string.Join(Environment.NewLine, errorList);
+    TempData["ErrorCount"] = errorList.Count;
+
+    return RedirectToAction("Index");
+}
+
+private IActionResult HandleSingleError(string message)
+{
+    TempData["Errors"] = message;
+    TempData["ErrorCount"] = 1;
+
+    return RedirectToAction("Index");
+}
+
+[HttpPost]
 public async Task<IActionResult> Upload(UploadViewModel model)
 {
     if (!ModelState.IsValid)
     {
-
         var modelErrors = ModelState.Values
-                    .SelectMany(v => v.Errors)
-                    .Select(e => e.ErrorMessage)
-                    .ToList();
-
-        TempData["Errors"] = string.Join(" | ", modelErrors);
-        TempData["ErrorCount"] = modelErrors.Count;
-        return RedirectToAction("Index");
+            .SelectMany(v => v.Errors)
+            .Select(e => e.ErrorMessage);
+        return HandleErrors(modelErrors);
     }
 
-
-    Guid guid = Guid.NewGuid();
-    var file = HttpContext.Request.Form.Files[0];
-    var specimenRepository = new SpecimenRepository(_context);
-
-    if (!file.FileName.ToUpper().EndsWith(Constants.CSVFileType))
-    {
-        TempData["Errors"] = "Invalid file uploaded.";
-        TempData["ErrorCount"] = 1;
-        return RedirectToAction("Index");
-    }
-
-    string filepath = $"{ConfigurationHelper.SpecimenFileUploadPath}\\{guid.ToString()}.csv";
-    using (var fileStream = new FileStream(filepath, FileMode.Create, FileAccess.Write))
-    {
-        file.OpenReadStream().CopyTo(fileStream);
-    }
-
-    // System.IO.File.Delete(filepath);
+    var file = HttpContext.Request.Form.Files.FirstOrDefault();
     if (file == null || file.Length == 0)
-    {
-        TempData["Errors"] = "No file uploaded.";
-        TempData["ErrorCount"] = 1;
-        return RedirectToAction("Index");
-    }
+        return HandleSingleError("No file uploaded.");
+
+    if (!file.FileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase) &&
+        !file.FileName.EndsWith(".xls", StringComparison.OrdinalIgnoreCase) &&
+        !file.FileName.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase))
+        return HandleSingleError("Invalid file format. Please upload a CSV or Excel file.");
 
     using var stream = file.OpenReadStream();
     var processor = new FileProcessor(_context);
 
-    //1 converts to datatable
+    // 1️⃣ Convert to DataTable
     var validationResult = processor.ReadFileToDataTable(stream, file.FileName);
-
     if (!validationResult.IsValid)
-    {
-        TempData["Errors"] = string.Join(Environment.NewLine, validationResult.Errors);
-        TempData["ErrorCount"] = validationResult.Errors.Count;
-        return RedirectToAction("Index");
-    }
+        return HandleErrors(validationResult.Errors);
 
-    //2. Validate headers
+    // 2️⃣ Validate Headers
     var headerCheck = processor.ValidateHeaders(validationResult.Specimens);
     if (!headerCheck.IsValid)
-    {
-        TempData["Errors"] = string.Join(Environment.NewLine, headerCheck.Errors);
-        TempData["ErrorCount"] = headerCheck.Errors.Count;
-        return RedirectToAction("Index");
-    }
+        return HandleErrors(headerCheck.Errors);
 
+    // 3️⃣ Validate & Prepare Specimens
     var validator = new LookupValidator(_context);
+    var specimens = processor.ParseDataTable(validationResult.Specimens, validator, out var validationErrors);
 
-    //3. Additinal Validations (Lookups, DataTypes etc)
-    var specimens = processor.ParseDataTable(validationResult.Specimens, validator, out var errors);
+    if (validationErrors.Any())
+        return HandleErrors(validationErrors);
 
-    if (errors.Any())
+    // 4️⃣ All-or-nothing Transaction
+    using var transaction = await _context.Database.BeginTransactionAsync();
+    try
     {
-        TempData["Errors"] = string.Join(Environment.NewLine, errors);
-        TempData["ErrorCount"] = errors.Count;
-        return RedirectToAction("Index");
-    }
+        var specimenRepository = new SpecimenRepository(_context);
+        var dbResult = await specimenRepository.BulkUploadUpdateSpecimenAsyn(specimens);
 
-    // DB Update
-    var dbResult = await specimenRepository.BulkUploadUpdateSpecimenAsyn(specimens);
-    if (dbResult.Count > 0)
-    {
-        TempData["Errors"] = string.Join(",", dbResult);
-        TempData["ErrorCount"] = 1;
-        return RedirectToAction("Index");
-    }
-    else
-    {
-        ViewBag.SuccessMessage = $"{specimens.Count} records processed and saved.";
+        if (dbResult.Count > 0)
+        {
+            await transaction.RollbackAsync();
+            return HandleErrors(dbResult);
+        }
+
+        await transaction.CommitAsync();
+        ViewBag.SuccessMessage = $"{specimens.Count} records processed and saved successfully.";
         return View("Index");
     }
-}
-
-public IActionResult DownloadErrors()
-{
-    if (!TempData.ContainsKey("Errors"))
-        return RedirectToAction("Index");
-
-    var errorText = TempData["Errors"].ToString();
-    var bytes = System.Text.Encoding.UTF8.GetBytes(errorText ?? "");
-    var fileName = $"UploadErrors_{DateTime.Now:yyyyMMdd_HHmmss}.txt";
-
-    return File(bytes, "text/plain", fileName);
+    catch (Exception ex)
+    {
+        await transaction.RollbackAsync();
+        return HandleSingleError($"Transaction failed: {ex.Message}");
+    }
 }
