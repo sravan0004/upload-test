@@ -1,144 +1,272 @@
-public async Task<IActionResult> Save([Bind] UserAccountModel userModel)
+using Microsoft.AspNetCore.Identity;
+using YourAppNamespace.Data.Entities;
+
+namespace YourAppNamespace.Models
 {
-    ModelState.Remove("UserAccountList");
-    ModelState.Remove("AuditableModel");
-    ModelState.Remove("SecurityRoleModel");
-    ModelState.Remove("UserSites");
-    ModelState.Remove("Sites");
-    ModelState.Remove("SiteList");
-    ModelState.Remove("UserSiteList");
-    ModelState.Remove("UserSiteModel");
-
-    if (!ModelState.IsValid)
+    public class UserSaveResultModel
     {
-        TempData.Put(Constants.Alert, new AlertModel(Constants.MessageType.Error,
-            Constants.ModuleName.UserAccount, "Form is not valid."));
-        return View(Constants.APIAction.Modify,
-            await _userAccountRepository.InitializeModelAsync(userModel, base.GetUserAccountID(), base.GetSecurityModule()));
-    }
-
-    var (result, message) = await _userAccountRepository.SaveUserAsync(
-        userModel, base.GetUserAccountID(), Url, Request);
-
-    if (result.Succeeded)
-    {
-        TempData.Put(Constants.Alert, new AlertModel(Constants.MessageType.Success,
-            Constants.ModuleName.UserAccount, $"{Constants.ModuleName.UserAccount} '{message}'"));
-        return RedirectToAction(Constants.APIAction.Search, Constants.APIController.UserAccount,
-            _userAccountRepository.GetRouteValues((string)CacheHelper.cache.Get(Constants.CacheName)));
-    }
-    else
-    {
-        TempData.Put(Constants.Alert, new AlertModel(Constants.MessageType.Error,
-            Constants.ModuleName.UserAccount, message));
-        return View(Constants.APIAction.Modify,
-            await _userAccountRepository.InitializeModelAsync(userModel, base.GetUserAccountID(), base.GetSecurityModule()));
+        public IdentityResult Result { get; set; }
+        public UserAccount User { get; set; }
+        public string Message { get; set; }
     }
 }
 
-public async Task<(IdentityResult Result, string Message)> SaveUserAsync(
-    UserAccountModel userModel,
-    int currentUserId,
-    IUrlHelper urlHelper,
-    HttpRequest request)
+using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+using YourAppNamespace.Data;
+using YourAppNamespace.Data.Entities;
+using YourAppNamespace.Models;
+
+namespace YourAppNamespace.Repositories
 {
-    var messages = new List<string>();
-    var isUpdating = userModel.UserAccount.Id > 0;
-
-    // Email validation
-    if (string.IsNullOrEmpty(userModel.UserAccount.Email))
+    public class UserAccountRepository : IUserAccountRepository
     {
-        return (IdentityResult.Failed(), "Please provide Email Address.");
-    }
+        private readonly UserManager<UserAccount> _userManager;
+        private readonly ApplicationDbContext _context;
 
-    var existingUser = await _userManager.FindByEmailAsync(userModel.UserAccount.Email);
-    if (!isUpdating && existingUser != null)
-    {
-        return (IdentityResult.Failed(), "Existing User, please verify");
-    }
-
-    UserAccount user;
-    IdentityResult createResult;
-
-    if (isUpdating)
-    {
-        user = existingUser;
-        user.FirstName = userModel.UserAccount.FirstName;
-        user.LastName = userModel.UserAccount.LastName;
-        user.MiddleName = userModel.UserAccount.MiddleName;
-        user.Title = userModel.UserAccount.Title;
-        user.PhoneNumber = userModel.UserAccount.PhoneNumber;
-        user.MobileNumber = userModel.UserAccount.MobileNumber;
-        user.ISSystemAdmin = userModel.UserAccount.ISSystemAdmin;
-        user.Active = userModel.UserAccount.Active;
-        user.DisplayName = $"{user.FirstName} {user.LastName}";
-        user.Updated = DateTime.Now;
-        user.UpdatedBy = currentUserId;
-
-        createResult = await _userManager.UpdateAsync(user);
-    }
-    else
-    {
-        user = new UserAccount
+        public UserAccountRepository(UserManager<UserAccount> userManager, ApplicationDbContext context)
         {
-            FirstName = userModel.UserAccount.FirstName,
-            LastName = userModel.UserAccount.LastName,
-            MiddleName = userModel.UserAccount.MiddleName,
-            Title = userModel.UserAccount.Title,
-            PhoneNumber = userModel.UserAccount.PhoneNumber,
-            MobileNumber = userModel.UserAccount.MobileNumber,
-            ISSystemAdmin = userModel.UserAccount.ISSystemAdmin,
-            Active = userModel.UserAccount.Active,
-            DisplayName = $"{userModel.UserAccount.FirstName} {userModel.UserAccount.LastName}",
-            Email = userModel.UserAccount.Email,
-            UserName = userModel.UserAccount.Email,
-            Created = DateTime.Now,
-            CreatedBy = currentUserId
-        };
+            _userManager = userManager;
+            _context = context;
+        }
 
-        createResult = await _userManager.CreateAsync(user);
-        if (!createResult.Succeeded)
-            return (createResult, "Failed to create user.");
-
-        // Send welcome email
-        var token = await _userManager.GeneratePasswordResetTokenAsync(user);
-        var callbackUrl = urlHelper.Action("SignUp", "Account",
-            new { email = user.Email, token = WebUtility.UrlEncode(token) }, request.Scheme);
-
-        var emailMessage = $@"
-            <html><body>
-            <h2>Welcome to eCRF 2.0, {user.DisplayName}!</h2>
-            <p>To get started, please click below:</p>
-            <a href='{callbackUrl}'>Complete Your Setup</a>
-            <p>Contact us at {ConfigurationHelper.UserAccountSupportGroupEmail}</p>
-            </body></html>";
-
-        var emailHelper = new EmailHelper();
-        var emailModel = new EmailModel
+        public async Task<UserSaveResultModel> SaveUserAsync(UserAccountModel userModel, int currentUserId)
         {
-            To = user.Email,
-            Subject = $"You're Invited! Start Your Journey with {ConfigurationHelper.ApplicationName}",
-            Body = emailMessage
-        };
-        emailHelper.Send(emailModel);
+            var isUpdating = userModel.UserAccount.Id > 0;
+
+            if (string.IsNullOrEmpty(userModel.UserAccount.Email))
+            {
+                return new UserSaveResultModel
+                {
+                    Result = IdentityResult.Failed(),
+                    Message = "Please provide Email Address."
+                };
+            }
+
+            var existingUser = await _userManager.FindByEmailAsync(userModel.UserAccount.Email);
+            if (!isUpdating && existingUser != null)
+            {
+                return new UserSaveResultModel
+                {
+                    Result = IdentityResult.Failed(),
+                    Message = "Existing User, please verify"
+                };
+            }
+
+            UserAccount user;
+            IdentityResult createResult;
+
+            if (isUpdating)
+            {
+                user = existingUser;
+                user.FirstName = userModel.UserAccount.FirstName;
+                user.LastName = userModel.UserAccount.LastName;
+                user.MiddleName = userModel.UserAccount.MiddleName;
+                user.Title = userModel.UserAccount.Title;
+                user.PhoneNumber = userModel.UserAccount.PhoneNumber;
+                user.MobileNumber = userModel.UserAccount.MobileNumber;
+                user.ISSystemAdmin = userModel.UserAccount.ISSystemAdmin;
+                user.Active = userModel.UserAccount.Active;
+                user.DisplayName = $"{user.FirstName} {user.LastName}";
+                user.Updated = DateTime.Now;
+                user.UpdatedBy = currentUserId;
+
+                createResult = await _userManager.UpdateAsync(user);
+            }
+            else
+            {
+                user = new UserAccount
+                {
+                    FirstName = userModel.UserAccount.FirstName,
+                    LastName = userModel.UserAccount.LastName,
+                    MiddleName = userModel.UserAccount.MiddleName,
+                    Title = userModel.UserAccount.Title,
+                    PhoneNumber = userModel.UserAccount.PhoneNumber,
+                    MobileNumber = userModel.UserAccount.MobileNumber,
+                    ISSystemAdmin = userModel.UserAccount.ISSystemAdmin,
+                    Active = userModel.UserAccount.Active,
+                    DisplayName = $"{userModel.UserAccount.FirstName} {userModel.UserAccount.LastName}",
+                    Email = userModel.UserAccount.Email,
+                    UserName = userModel.UserAccount.Email,
+                    Created = DateTime.Now,
+                    CreatedBy = currentUserId
+                };
+
+                createResult = await _userManager.CreateAsync(user);
+                if (!createResult.Succeeded)
+                {
+                    return new UserSaveResultModel
+                    {
+                        Result = createResult,
+                        Message = "Failed to create user."
+                    };
+                }
+            }
+
+            // Manage roles
+            var activeRoles = userModel.UserSecurityRoleModel
+                .Where(x => x.Active)
+                .Select(x => x.SecurityRoleName)
+                .ToList();
+
+            var currentRoles = await _userManager.GetRolesAsync(user);
+            var rolesToAdd = activeRoles.Except(currentRoles).ToList();
+            var rolesToRemove = currentRoles.Except(activeRoles).ToList();
+
+            await _userManager.RemoveFromRolesAsync(user, rolesToRemove);
+            await _userManager.AddToRolesAsync(user, rolesToAdd);
+
+            // Save user sites
+            await SaveUserSiteAsync(user.Id, userModel.UserSiteList);
+
+            return new UserSaveResultModel
+            {
+                Result = createResult,
+                User = user,
+                Message = $"{user.DisplayName} saved successfully."
+            };
+        }
+
+        public async Task SaveUserSiteAsync(int userId, List<UserSiteModel> siteList)
+        {
+            var existing = await _context.UserSites
+                .Where(x => x.UserAccountId == userId)
+                .ToListAsync();
+
+            _context.UserSites.RemoveRange(existing);
+
+            if (siteList != null && siteList.Any())
+            {
+                foreach (var site in siteList)
+                {
+                    _context.UserSites.Add(new UserSite
+                    {
+                        UserAccountId = userId,
+                        SiteId = site.SiteId,
+                        Active = site.Active,
+                        Created = DateTime.Now
+                    });
+                }
+            }
+
+            await _context.SaveChangesAsync();
+        }
+
+        public async Task<UserAccountModel> InitializeModelAsync(UserAccountModel model, int userId, string module)
+        {
+            // Your existing initialization logic here
+            return await Task.FromResult(model);
+        }
     }
-
-    // Manage roles
-    var activeRoles = userModel.UserSecurityRoleModel
-        .Where(x => x.Active)
-        .Select(x => x.SecurityRoleName)
-        .ToList();
-
-    var currentRoles = await _userManager.GetRolesAsync(user);
-    var rolesToAdd = activeRoles.Except(currentRoles).ToList();
-    var rolesToRemove = currentRoles.Except(activeRoles).ToList();
-
-    await _userManager.RemoveFromRolesAsync(user, rolesToRemove);
-    await _userManager.AddToRolesAsync(user, rolesToAdd);
-
-    // Save user sites
-    await SaveUserSiteAsync(user.Id, userModel.UserSiteList);
-
-    return (createResult, $"{user.DisplayName} saved successfully.");
 }
-Task<IdentityResult> SaveUserAsync(UserAccountModel userModel, int currentUserId, IUrlHelper urlHelper, HttpRequest request);
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using YourAppNamespace.Models;
+
+namespace YourAppNamespace.Repositories
+{
+    public interface IUserAccountRepository
+    {
+        Task<UserSaveResultModel> SaveUserAsync(UserAccountModel userModel, int currentUserId);
+        Task SaveUserSiteAsync(int userId, List<UserSiteModel> siteList);
+        Task<UserAccountModel> InitializeModelAsync(UserAccountModel model, int userId, string module);
+    }
+}
+using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Mvc;
+using System;
+using System.Linq;
+using System.Net;
+using System.Threading.Tasks;
+using YourAppNamespace.Helpers;
+using YourAppNamespace.Models;
+using YourAppNamespace.Repositories;
+using YourAppNamespace.Data.Entities;
+
+namespace YourAppNamespace.Controllers
+{
+    public class UserAccountController : BaseController
+    {
+        private readonly IUserAccountRepository _userAccountRepository;
+        private readonly UserManager<UserAccount> _userManager;
+
+        public UserAccountController(IUserAccountRepository userAccountRepository, UserManager<UserAccount> userManager)
+        {
+            _userAccountRepository = userAccountRepository;
+            _userManager = userManager;
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> Save([Bind] UserAccountModel userModel)
+        {
+            // Clean up unrelated ModelState entries
+            ModelState.Remove("UserAccountList");
+            ModelState.Remove("AuditableModel");
+            ModelState.Remove("SecurityRoleModel");
+            ModelState.Remove("UserSites");
+            ModelState.Remove("Sites");
+            ModelState.Remove("SiteList");
+            ModelState.Remove("UserSiteList");
+            ModelState.Remove("UserSiteModel");
+
+            if (!ModelState.IsValid)
+            {
+                TempData.Put(Constants.Alert, new AlertModel(Constants.MessageType.Error,
+                    Constants.ModuleName.UserAccount, "Form is not valid."));
+                return View(Constants.APIAction.Modify,
+                    await _userAccountRepository.InitializeModelAsync(userModel, base.GetUserAccountID(), base.GetSecurityModule()));
+            }
+
+            var saveResult = await _userAccountRepository.SaveUserAsync(userModel, base.GetUserAccountID());
+
+            if (saveResult.Result.Succeeded)
+            {
+                // Send email only for new user creation
+                if (userModel.UserAccount.Id == 0)
+                {
+                    var token = await _userManager.GeneratePasswordResetTokenAsync(saveResult.User);
+                    var callbackUrl = Url.Action("SignUp", "Account",
+                        new { email = saveResult.User.Email, token = WebUtility.UrlEncode(token) }, Request.Scheme);
+
+                    var emailMessage = $@"
+                        <html><body>
+                        <h2>Welcome to eCRF 2.0, {saveResult.User.DisplayName}!</h2>
+                        <p>To get started, click below:</p>
+                        <a href='{callbackUrl}'>Complete Your Setup</a>
+                        <p>Contact support: {ConfigurationHelper.UserAccountSupportGroupEmail}</p>
+                        </body></html>";
+
+                    var emailHelper = new EmailHelper();
+                    emailHelper.Send(new EmailModel
+                    {
+                        To = saveResult.User.Email,
+                        Subject = $"You're Invited! Start Your Journey with {ConfigurationHelper.ApplicationName}",
+                        Body = emailMessage
+                    });
+                }
+
+                TempData.Put(Constants.Alert, new AlertModel(Constants.MessageType.Success,
+                    Constants.ModuleName.UserAccount, $"{Constants.ModuleName.UserAccount} '{saveResult.User.DisplayName}' saved."));
+
+                return RedirectToAction(Constants.APIAction.Search, Constants.APIController.UserAccount,
+                    _userAccountRepository.GetRouteValues((string)CacheHelper.cache.Get(Constants.CacheName)));
+            }
+            else
+            {
+                TempData.Put(Constants.Alert, new AlertModel(Constants.MessageType.Error,
+                    Constants.ModuleName.UserAccount, saveResult.Message));
+
+                return View(Constants.APIAction.Modify,
+                    await _userAccountRepository.InitializeModelAsync(userModel, base.GetUserAccountID(), base.GetSecurityModule()));
+            }
+        }
+    }
+}
+
+
+builder.Services.AddScoped<IUserAccountRepository, UserAccountRepository>();
