@@ -1,0 +1,150 @@
+ public async Task<IActionResult> Save([Bind] UserAccountModel userModel)
+ {
+     ModelState.Remove("UserAccountList");
+     ModelState.Remove("AuditableModel");
+     ModelState.Remove("SecurityRoleModel");
+     ModelState.Remove("UserSites");
+     ModelState.Remove("Sites");
+     ModelState.Remove("SiteList");
+     ModelState.Remove("UserSiteList");
+     ModelState.Remove("UserSiteModel");
+
+     if (ModelState.IsValid)
+     {
+         bool hasSuperAdminRole = userModel.UserSecurityRoleModel.Any(x => x.Active && x.SecurityRoleID == (int)Constants.SecurityRole.SuperAdmin);
+         bool hasOtherRoles = userModel.UserSecurityRoleModel.Any(x => x.Active && x.SecurityRoleID != (int)Constants.SecurityRole.SuperAdmin);
+
+         var messages = new List<string>();
+
+         if (string.IsNullOrEmpty(userModel.UserAccount.Email))
+         {
+             messages.Add("Please provide Email Address.");
+             TempData.Put(Constants.Alert, new AlertModel(Constants.MessageType.Error, Constants.ModuleName.UserAccount, string.Join(" | ", messages.Select(e => e))));
+             return View(Constants.APIAction.Modify, await _userAccountRepository.InitializeModelAsync(new UserAccountModel { UserAccount = userModel.UserAccount, AuditableModel = await _userAccountRepository.GetAuditAsync(userModel.UserAccount.Id) }, base.GetUserAccountID(), base.GetSecurityModule()));
+         }
+
+         if (!hasSuperAdminRole && hasOtherRoles && (userModel.UserSiteList == null || userModel.UserSiteList.Count == 0))
+         {
+             messages.Add("Please select atleast one Site.");
+         }
+
+         var existingUser = await _userManager.FindByEmailAsync(userModel.UserAccount.Email);
+         var isUpdating = userModel.UserAccount.Id > 0;
+
+         if (!isUpdating && existingUser != null)
+         {
+             messages.Add("Existing User, please verify");
+         }
+
+         if (messages.Count > 0)
+         {
+             TempData.Put(Constants.Alert, new AlertModel(Constants.MessageType.Error, Constants.ModuleName.UserAccount, string.Join(" | ", messages.Select(e => e))));
+             return View(Constants.APIAction.Modify, await _userAccountRepository.InitializeModelAsync(new UserAccountModel { UserAccount = userModel.UserAccount, AuditableModel = await _userAccountRepository.GetAuditAsync(userModel.UserAccount.Id) }, base.GetUserAccountID(), base.GetSecurityModule()));
+         }
+
+         UserAccount user;
+         IdentityResult createResult = null;
+
+         if (isUpdating)
+         {
+             user = existingUser;
+             user.FirstName = userModel.UserAccount.FirstName;
+             user.LastName = userModel.UserAccount.LastName;
+             user.MiddleName = userModel.UserAccount.MiddleName;
+             user.Title = userModel.UserAccount.Title;
+             user.PhoneNumber = userModel.UserAccount.PhoneNumber;
+             user.MobileNumber = userModel.UserAccount.MobileNumber;
+             user.ISSystemAdmin = userModel.UserAccount.ISSystemAdmin;
+             user.Active = userModel.UserAccount.Active;
+             user.DisplayName = $"{user.FirstName} {user.LastName}";
+             user.Updated = DateTime.Now;
+             user.UpdatedBy = base.GetUserAccountID();
+             createResult = await _userManager.UpdateAsync(user);
+         }
+         else
+         {
+             user = new UserAccount
+             {
+                 FirstName = userModel.UserAccount.FirstName,
+                 LastName = userModel.UserAccount.LastName,
+                 MiddleName = userModel.UserAccount.MiddleName,
+                 Title = userModel.UserAccount.Title,
+                 PhoneNumber = userModel.UserAccount.PhoneNumber,
+                 MobileNumber = userModel.UserAccount.MobileNumber,
+                 ISSystemAdmin = userModel.UserAccount.ISSystemAdmin,
+                 Active = userModel.UserAccount.Active,
+                 DisplayName = $"{userModel.UserAccount.FirstName} {userModel.UserAccount.LastName}",
+                 Email = userModel.UserAccount.Email,
+                 UserName = userModel.UserAccount.Email,
+                 Created = DateTime.Now,
+                 CreatedBy = base.GetUserAccountID()
+             };
+
+             createResult = await _userManager.CreateAsync(user);
+             if (!createResult.Succeeded)
+             {
+                 ModelState.AddModelError("", "Failed to create user.");
+             }
+             else
+             {
+                 var token = await _userManager.GeneratePasswordResetTokenAsync(user);
+
+                 var callbackUrl = Url.Action("SignUp", "Account", new { email = user.Email, token = WebUtility.UrlEncode(token) }, Request.Scheme);
+
+                 var emailMessage = $"<html><body><div class='container'><h2>Welcome to eCRF 2.0, {user.DisplayName}!</h2>" +
+                $"<p>You've been invited to join our platform. We're excited to have you on board!</p>" +
+                $"<p>To get started, please click the button below to complete your account setup:</p>" +
+                $"<a href='{callbackUrl}' class='cta-button'>Complete Your Setup</a>" +
+                $"<p>If you have any questions, feel free to reach out to our support team at <a href=''mailto:{ConfigurationHelper.UserAccountSupportGroupEmail}'>{ConfigurationHelper.UserAccountSupportGroupEmail}</a>.</p>" +
+                $"<p>Enjoy the journey,</p>" +
+                " <div><span style='color:black;font-weight:bold;font-size: 12px;'>This is a system generated email. Please do not reply to this message.</span></div></body></html>";
+
+                 var emailHelper = new EmailHelper();
+                 var emailModel = new EmailModel()
+                 {
+                     To = user.Email,
+                     Subject = $"You're Invited! Start Your Journey with {ConfigurationHelper.ApplicationName}",
+                     Body = emailMessage
+                 };
+                 emailHelper.Send(emailModel);
+             }
+         }
+
+         var activeRoles = userModel.UserSecurityRoleModel
+             .Where(x => x.Active)
+             .Select(x => x.SecurityRoleName)
+             .ToList();
+
+         var currentRoles = await _userManager.GetRolesAsync(user);
+         var rolesToAdd = activeRoles.Except(currentRoles).ToList();
+         var rolesToRemove = currentRoles.Except(activeRoles).ToList();
+
+         await _userManager.RemoveFromRolesAsync(user, rolesToRemove);
+         await _userManager.AddToRolesAsync(user, rolesToAdd);
+
+         await _userAccountRepository.SaveUserSiteAsync(user.Id, userModel.UserSiteList);
+
+         if (createResult != null)
+         {
+             TempData.Put(Constants.Alert, new AlertModel(Constants.MessageType.Success, Constants.ModuleName.UserAccount, $"{Constants.ModuleName.UserAccount} '{user.DisplayName}' saved."));
+             if (CacheHelper.cache.Get(Constants.CacheName) == null) return RedirectToAction(nameof(Index));
+             return RedirectToAction(Constants.APIAction.Search, Constants.APIController.UserAccount, _userAccountRepository.GetRouteValues((string)CacheHelper.cache.Get(Constants.CacheName)));
+         }
+         else if (isUpdating)
+         {
+             TempData.Put(Constants.Alert, new AlertModel(Constants.MessageType.Success, Constants.ModuleName.UserAccount, $"{Constants.ModuleName.UserAccount} '{user.DisplayName}' saved."));
+             if (CacheHelper.cache.Get(Constants.CacheName) == null) return RedirectToAction(nameof(Index));
+             return RedirectToAction(Constants.APIAction.Search, Constants.APIController.UserAccount, _userAccountRepository.GetRouteValues((string)CacheHelper.cache.Get(Constants.CacheName)));
+         }
+         else
+         {
+             TempData.Put(Constants.Alert, new AlertModel(Constants.MessageType.Error, Constants.ModuleName.UserAccount, "Failed to create user."));
+             return View(Constants.APIAction.Modify, await _userAccountRepository.InitializeModelAsync(new UserAccountModel { UserAccount = userModel.UserAccount, AuditableModel = await _userAccountRepository.GetAuditAsync(userModel.UserAccount.Id) }, base.GetUserAccountID(), base.GetSecurityModule()));
+         }
+     }
+     else
+     {
+         TempData.Put(Constants.Alert, new AlertModel(Constants.MessageType.Error, Constants.ModuleName.UserAccount, "Form is not valid."));
+         return View(Constants.APIAction.Modify, await _userAccountRepository.InitializeModelAsync(new UserAccountModel { UserAccount = userModel.UserAccount, AuditableModel = await _userAccountRepository.GetAuditAsync(userModel.UserAccount.Id) }, base.GetUserAccountID(), base.GetSecurityModule()));
+     }
+ }
