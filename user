@@ -1,272 +1,398 @@
-using Microsoft.AspNetCore.Identity;
-using YourAppNamespace.Data.Entities;
+SharePointBatchProcessor/
+ ├── SharePointBatchProcessor.csproj
+ ├── Program.cs
+ ├── appsettings.json
+ ├── Common/
+ │    ├── SiteMessage.cs
+ │    ├── SharePointClientFactory.cs
+ │    └── AwsClientFactory.cs
+ ├── Publisher/
+ │    └── SitePublisherJob.cs
+ ├── Consumer/
+ │    ├── SqsProcessor.cs
+ │    ├── MessageHandler.cs
+ │    └── OracleBulkExporter.cs
+ └── Infrastructure/
+      └── CloudFormationTemplate.yaml
+<Project Sdk="Microsoft.NET.Sdk.Worker">
 
-namespace YourAppNamespace.Models
+  <PropertyGroup>
+    <TargetFramework>net7.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>SharePointBatchProcessor</RootNamespace>
+    <AssemblyName>SharePointBatchProcessor</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- ✅ Official AWS SDK packages -->
+    <PackageReference Include="AWSSDK.Core" Version="3.*" />
+    <PackageReference Include="AWSSDK.SQS" Version="3.*" />
+    <PackageReference Include="AWSSDK.SecretsManager" Version="3.*" />
+
+    <!-- Microsoft Graph / Azure Identity -->
+    <PackageReference Include="Microsoft.Graph" Version="5.*" />
+    <PackageReference Include="Azure.Identity" Version="1.*" />
+
+    <!-- Hangfire for scheduling -->
+    <PackageReference Include="Hangfire.Core" Version="1.*" />
+    <PackageReference Include="Hangfire.AspNetCore" Version="1.*" />
+    <PackageReference Include="Hangfire.MemoryStorage" Version="1.*" />
+
+    <!-- Utilities -->
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="7.*" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="7.*" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.*" />
+  </ItemGroup>
+
+</Project>
+
 {
-    public class UserSaveResultModel
+  "Aws": {
+    "Region": "us-east-1",
+    "QueueUrl": "https://sqs.us-east-1.amazonaws.com/123456789012/sharepoint-jobs"
+  },
+  "Sqs": {
+    "MaxParallelism": 20
+  },
+  "SharePoint": {
+    "TenantId": "your-tenant-id",
+    "ClientId": "your-client-id",
+    "ClientSecret": "your-client-secret"
+  },
+  "Oracle": {
+    "ConnectionString": "User Id=xyz;Password=xyz;Data Source=your-oracle-db"
+  }
+}
+namespace SharePointBatchProcessor.Common;
+
+public class SiteMessage
+{
+    public string SiteId { get; set; } = string.Empty;
+    public string SiteName { get; set; } = string.Empty;
+    public string SiteUrl { get; set; } = string.Empty;
+    public DateTime? CreatedDateTime { get; set; }
+}
+using Amazon;
+using Amazon.SQS;
+
+namespace SharePointBatchProcessor.Common;
+
+public static class AwsClientFactory
+{
+    public static IAmazonSQS CreateSqsClient(string regionName)
     {
-        public IdentityResult Result { get; set; }
-        public UserAccount User { get; set; }
-        public string Message { get; set; }
+        var region = RegionEndpoint.GetBySystemName(regionName);
+        return new AmazonSQSClient(region);
     }
 }
-
-using Microsoft.AspNetCore.Identity;
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
-using YourAppNamespace.Data;
-using YourAppNamespace.Data.Entities;
-using YourAppNamespace.Models;
-
-namespace YourAppNamespace.Repositories
-{
-    public class UserAccountRepository : IUserAccountRepository
-    {
-        private readonly UserManager<UserAccount> _userManager;
-        private readonly ApplicationDbContext _context;
-
-        public UserAccountRepository(UserManager<UserAccount> userManager, ApplicationDbContext context)
-        {
-            _userManager = userManager;
-            _context = context;
-        }
-
-        public async Task<UserSaveResultModel> SaveUserAsync(UserAccountModel userModel, int currentUserId)
-        {
-            var isUpdating = userModel.UserAccount.Id > 0;
-
-            if (string.IsNullOrEmpty(userModel.UserAccount.Email))
-            {
-                return new UserSaveResultModel
-                {
-                    Result = IdentityResult.Failed(),
-                    Message = "Please provide Email Address."
-                };
-            }
-
-            var existingUser = await _userManager.FindByEmailAsync(userModel.UserAccount.Email);
-            if (!isUpdating && existingUser != null)
-            {
-                return new UserSaveResultModel
-                {
-                    Result = IdentityResult.Failed(),
-                    Message = "Existing User, please verify"
-                };
-            }
-
-            UserAccount user;
-            IdentityResult createResult;
-
-            if (isUpdating)
-            {
-                user = existingUser;
-                user.FirstName = userModel.UserAccount.FirstName;
-                user.LastName = userModel.UserAccount.LastName;
-                user.MiddleName = userModel.UserAccount.MiddleName;
-                user.Title = userModel.UserAccount.Title;
-                user.PhoneNumber = userModel.UserAccount.PhoneNumber;
-                user.MobileNumber = userModel.UserAccount.MobileNumber;
-                user.ISSystemAdmin = userModel.UserAccount.ISSystemAdmin;
-                user.Active = userModel.UserAccount.Active;
-                user.DisplayName = $"{user.FirstName} {user.LastName}";
-                user.Updated = DateTime.Now;
-                user.UpdatedBy = currentUserId;
-
-                createResult = await _userManager.UpdateAsync(user);
-            }
-            else
-            {
-                user = new UserAccount
-                {
-                    FirstName = userModel.UserAccount.FirstName,
-                    LastName = userModel.UserAccount.LastName,
-                    MiddleName = userModel.UserAccount.MiddleName,
-                    Title = userModel.UserAccount.Title,
-                    PhoneNumber = userModel.UserAccount.PhoneNumber,
-                    MobileNumber = userModel.UserAccount.MobileNumber,
-                    ISSystemAdmin = userModel.UserAccount.ISSystemAdmin,
-                    Active = userModel.UserAccount.Active,
-                    DisplayName = $"{userModel.UserAccount.FirstName} {userModel.UserAccount.LastName}",
-                    Email = userModel.UserAccount.Email,
-                    UserName = userModel.UserAccount.Email,
-                    Created = DateTime.Now,
-                    CreatedBy = currentUserId
-                };
-
-                createResult = await _userManager.CreateAsync(user);
-                if (!createResult.Succeeded)
-                {
-                    return new UserSaveResultModel
-                    {
-                        Result = createResult,
-                        Message = "Failed to create user."
-                    };
-                }
-            }
-
-            // Manage roles
-            var activeRoles = userModel.UserSecurityRoleModel
-                .Where(x => x.Active)
-                .Select(x => x.SecurityRoleName)
-                .ToList();
-
-            var currentRoles = await _userManager.GetRolesAsync(user);
-            var rolesToAdd = activeRoles.Except(currentRoles).ToList();
-            var rolesToRemove = currentRoles.Except(activeRoles).ToList();
-
-            await _userManager.RemoveFromRolesAsync(user, rolesToRemove);
-            await _userManager.AddToRolesAsync(user, rolesToAdd);
-
-            // Save user sites
-            await SaveUserSiteAsync(user.Id, userModel.UserSiteList);
-
-            return new UserSaveResultModel
-            {
-                Result = createResult,
-                User = user,
-                Message = $"{user.DisplayName} saved successfully."
-            };
-        }
-
-        public async Task SaveUserSiteAsync(int userId, List<UserSiteModel> siteList)
-        {
-            var existing = await _context.UserSites
-                .Where(x => x.UserAccountId == userId)
-                .ToListAsync();
-
-            _context.UserSites.RemoveRange(existing);
-
-            if (siteList != null && siteList.Any())
-            {
-                foreach (var site in siteList)
-                {
-                    _context.UserSites.Add(new UserSite
-                    {
-                        UserAccountId = userId,
-                        SiteId = site.SiteId,
-                        Active = site.Active,
-                        Created = DateTime.Now
-                    });
-                }
-            }
-
-            await _context.SaveChangesAsync();
-        }
-
-        public async Task<UserAccountModel> InitializeModelAsync(UserAccountModel model, int userId, string module)
-        {
-            // Your existing initialization logic here
-            return await Task.FromResult(model);
-        }
-    }
-}
-using System.Collections.Generic;
-using System.Threading.Tasks;
-using YourAppNamespace.Models;
-
-namespace YourAppNamespace.Repositories
-{
-    public interface IUserAccountRepository
-    {
-        Task<UserSaveResultModel> SaveUserAsync(UserAccountModel userModel, int currentUserId);
-        Task SaveUserSiteAsync(int userId, List<UserSiteModel> siteList);
-        Task<UserAccountModel> InitializeModelAsync(UserAccountModel model, int userId, string module);
-    }
-}
-using Microsoft.AspNetCore.Identity;
-using Microsoft.AspNetCore.Mvc;
-using System;
-using System.Linq;
+using Microsoft.Graph;
+using Azure.Identity;
 using System.Net;
-using System.Threading.Tasks;
-using YourAppNamespace.Helpers;
-using YourAppNamespace.Models;
-using YourAppNamespace.Repositories;
-using YourAppNamespace.Data.Entities;
 
-namespace YourAppNamespace.Controllers
+namespace SharePointBatchProcessor.Common;
+
+public static class SharePointClientFactory
 {
-    public class UserAccountController : BaseController
+    // TODO: Replace ConfigHelper.StaticConfig references with your configuration provider
+    public static GraphServiceClient CreateClient(IConfiguration config, ILogger logger)
     {
-        private readonly IUserAccountRepository _userAccountRepository;
-        private readonly UserManager<UserAccount> _userManager;
-
-        public UserAccountController(IUserAccountRepository userAccountRepository, UserManager<UserAccount> userManager)
+        try
         {
-            _userAccountRepository = userAccountRepository;
-            _userManager = userManager;
+            var proxyAddress = config["SharePoint:Proxy"];
+            var scopes = new[] { config["SharePoint:Scope"] };
+            var tenantId = config["SharePoint:TenantId"];
+            var clientId = config["SharePoint:ClientId"];
+            var clientSecret = config["SharePoint:ClientSecret"];
+
+            var handler = new HttpClientHandler { Proxy = new WebProxy(proxyAddress) };
+            var options = new ClientSecretCredentialOptions { Transport = new HttpClientTransport(handler) };
+            var credential = new ClientSecretCredential(tenantId, clientId, clientSecret, options);
+
+            var authProvider = new AzureIdentityAuthenticationProvider(credential, null, null, scopes);
+            var httpClient = GraphClientFactory.Create();
+            return new GraphServiceClient(httpClient, authProvider);
         }
-
-        [HttpPost]
-        public async Task<IActionResult> Save([Bind] UserAccountModel userModel)
+        catch (Exception ex)
         {
-            // Clean up unrelated ModelState entries
-            ModelState.Remove("UserAccountList");
-            ModelState.Remove("AuditableModel");
-            ModelState.Remove("SecurityRoleModel");
-            ModelState.Remove("UserSites");
-            ModelState.Remove("Sites");
-            ModelState.Remove("SiteList");
-            ModelState.Remove("UserSiteList");
-            ModelState.Remove("UserSiteModel");
-
-            if (!ModelState.IsValid)
-            {
-                TempData.Put(Constants.Alert, new AlertModel(Constants.MessageType.Error,
-                    Constants.ModuleName.UserAccount, "Form is not valid."));
-                return View(Constants.APIAction.Modify,
-                    await _userAccountRepository.InitializeModelAsync(userModel, base.GetUserAccountID(), base.GetSecurityModule()));
-            }
-
-            var saveResult = await _userAccountRepository.SaveUserAsync(userModel, base.GetUserAccountID());
-
-            if (saveResult.Result.Succeeded)
-            {
-                // Send email only for new user creation
-                if (userModel.UserAccount.Id == 0)
-                {
-                    var token = await _userManager.GeneratePasswordResetTokenAsync(saveResult.User);
-                    var callbackUrl = Url.Action("SignUp", "Account",
-                        new { email = saveResult.User.Email, token = WebUtility.UrlEncode(token) }, Request.Scheme);
-
-                    var emailMessage = $@"
-                        <html><body>
-                        <h2>Welcome to eCRF 2.0, {saveResult.User.DisplayName}!</h2>
-                        <p>To get started, click below:</p>
-                        <a href='{callbackUrl}'>Complete Your Setup</a>
-                        <p>Contact support: {ConfigurationHelper.UserAccountSupportGroupEmail}</p>
-                        </body></html>";
-
-                    var emailHelper = new EmailHelper();
-                    emailHelper.Send(new EmailModel
-                    {
-                        To = saveResult.User.Email,
-                        Subject = $"You're Invited! Start Your Journey with {ConfigurationHelper.ApplicationName}",
-                        Body = emailMessage
-                    });
-                }
-
-                TempData.Put(Constants.Alert, new AlertModel(Constants.MessageType.Success,
-                    Constants.ModuleName.UserAccount, $"{Constants.ModuleName.UserAccount} '{saveResult.User.DisplayName}' saved."));
-
-                return RedirectToAction(Constants.APIAction.Search, Constants.APIController.UserAccount,
-                    _userAccountRepository.GetRouteValues((string)CacheHelper.cache.Get(Constants.CacheName)));
-            }
-            else
-            {
-                TempData.Put(Constants.Alert, new AlertModel(Constants.MessageType.Error,
-                    Constants.ModuleName.UserAccount, saveResult.Message));
-
-                return View(Constants.APIAction.Modify,
-                    await _userAccountRepository.InitializeModelAsync(userModel, base.GetUserAccountID(), base.GetSecurityModule()));
-            }
+            logger.LogError(ex, "Error creating Graph client");
+            throw;
         }
     }
 }
+using Amazon.SQS;
+using Amazon.SQS.Model;
+using Microsoft.Graph;
+using Newtonsoft.Json;
+using SharePointBatchProcessor.Common;
 
+namespace SharePointBatchProcessor.Publisher;
 
-builder.Services.AddScoped<IUserAccountRepository, UserAccountRepository>();
+public class SitePublisherJob
+{
+    private readonly IAmazonSQS _sqs;
+    private readonly IConfiguration _config;
+    private readonly ILogger<SitePublisherJob> _logger;
+
+    public SitePublisherJob(IAmazonSQS sqs, IConfiguration config, ILogger<SitePublisherJob> logger)
+    {
+        _sqs = sqs;
+        _config = config;
+        _logger = logger;
+    }
+
+    [Hangfire.AutomaticRetry(Attempts = 0)]
+    public async Task ExecuteAsync()
+    {
+        _logger.LogInformation("Publisher started");
+
+        var graphClient = SharePointClientFactory.CreateClient(_config, _logger);
+        var allSites = new List<Site>();
+
+        var response = await graphClient.Sites.GetAsync(r => r.QueryParameters.Top = 100);
+        while (response != null)
+        {
+            allSites.AddRange(response.Value.Where(x => !string.IsNullOrEmpty(x.WebUrl)));
+            if (string.IsNullOrEmpty(response.OdataNextLink)) break;
+            var builder = new SitesRequestBuilder(response.OdataNextLink, graphClient.RequestAdapter);
+            response = await builder.GetAsync();
+        }
+
+        var filteredSites = allSites.Where(s => !s.WebUrl.Contains("my.sharepoint.com")).ToList();
+        _logger.LogInformation("Publishing {count} sites to SQS", filteredSites.Count);
+
+        foreach (var site in filteredSites)
+        {
+            var msg = new SiteMessage
+            {
+                SiteId = site.Id,
+                SiteName = site.Name,
+                SiteUrl = site.WebUrl,
+                CreatedDateTime = site.CreatedDateTime
+            };
+
+            await _sqs.SendMessageAsync(new SendMessageRequest
+            {
+                QueueUrl = _config["Aws:QueueUrl"],
+                MessageBody = JsonConvert.SerializeObject(msg)
+            });
+        }
+
+        _logger.LogInformation("Publisher finished");
+    }
+}
+using Amazon.SQS;
+using Amazon.SQS.Model;
+
+namespace SharePointBatchProcessor.Consumer;
+
+public class SqsProcessor
+{
+    private readonly IAmazonSQS _sqs;
+    private readonly IConfiguration _config;
+    private readonly MessageHandler _handler;
+    private readonly ILogger<SqsProcessor> _logger;
+    private readonly int _parallelism;
+
+    public SqsProcessor(IAmazonSQS sqs, IConfiguration config, MessageHandler handler, ILogger<SqsProcessor> logger)
+    {
+        _sqs = sqs;
+        _config = config;
+        _handler = handler;
+        _logger = logger;
+        _parallelism = int.Parse(_config["Sqs:MaxParallelism"] ?? "10");
+    }
+
+    public async Task RunAsync(CancellationToken token)
+    {
+        var queueUrl = _config["Aws:QueueUrl"]!;
+        var semaphore = new SemaphoreSlim(_parallelism);
+
+        _logger.LogInformation("SQS processor started with {p} workers", _parallelism);
+
+        while (!token.IsCancellationRequested)
+        {
+            var response = await _sqs.ReceiveMessageAsync(new ReceiveMessageRequest
+            {
+                QueueUrl = queueUrl,
+                MaxNumberOfMessages = 10,
+                WaitTimeSeconds = 20,
+                VisibilityTimeout = 900
+            }, token);
+
+            if (response.Messages.Count == 0)
+                continue;
+
+            var tasks = response.Messages.Select(async msg =>
+            {
+                await semaphore.WaitAsync(token);
+                try
+                {
+                    bool ok = await _handler.ProcessAsync(msg.Body);
+                    if (ok)
+                        await _sqs.DeleteMessageAsync(queueUrl, msg.ReceiptHandle, token);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error processing message");
+                }
+                finally
+                {
+                    semaphore.Release();
+                }
+            });
+
+            await Task.WhenAll(tasks);
+        }
+    }
+}
+using Newtonsoft.Json;
+using SharePointBatchProcessor.Common;
+
+namespace SharePointBatchProcessor.Consumer;
+
+public class MessageHandler
+{
+    private readonly OracleBulkExporter _exporter;
+    private readonly ILogger<MessageHandler> _logger;
+
+    public MessageHandler(OracleBulkExporter exporter, ILogger<MessageHandler> logger)
+    {
+        _exporter = exporter;
+        _logger = logger;
+    }
+
+    public async Task<bool> ProcessAsync(string body)
+    {
+        var site = JsonConvert.DeserializeObject<SiteMessage>(body);
+        if (site == null) return true;
+
+        try
+        {
+            // TODO: Replace with your existing SharePoint data fetch logic
+            await Task.Delay(100);
+            await _exporter.AddAsync(site);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to process {url}", site.SiteUrl);
+            return false;
+        }
+    }
+}
+using System.Collections.Concurrent;
+
+namespace SharePointBatchProcessor.Consumer;
+
+public class OracleBulkExporter : IDisposable
+{
+    private readonly ConcurrentQueue<object> _buffer = new();
+    private readonly ILogger<OracleBulkExporter> _logger;
+    private readonly Timer _flushTimer;
+    private readonly int _flushSize;
+
+    public OracleBulkExporter(ILogger<OracleBulkExporter> logger)
+    {
+        _logger = logger;
+        _flushSize = 100;
+        _flushTimer = new Timer(async _ => await FlushAsync(), null, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
+    }
+
+    public Task AddAsync(object record)
+    {
+        _buffer.Enqueue(record);
+        if (_buffer.Count >= _flushSize)
+            _ = FlushAsync();
+        return Task.CompletedTask;
+    }
+
+    public async Task FlushAsync()
+    {
+        var batch = new List<object>();
+        while (_buffer.TryDequeue(out var item))
+            batch.Add(item);
+
+        if (batch.Count == 0) return;
+        _logger.LogInformation("Flushing {count} records to Oracle...", batch.Count);
+
+        // TODO: Replace this with your actual Oracle bulk copy exporter
+        await Task.Delay(100);
+    }
+
+    public void Dispose()
+    {
+        _flushTimer?.Dispose();
+        FlushAsync().GetAwaiter().GetResult();
+    }
+}
+using Amazon.SQS;
+using Amazon;
+using Hangfire;
+using Hangfire.MemoryStorage;
+using Microsoft.Extensions.Hosting;
+using SharePointBatchProcessor.Common;
+using SharePointBatchProcessor.Publisher;
+using SharePointBatchProcessor.Consumer;
+
+var builder = Host.CreateApplicationBuilder(args);
+
+// AWS SQS client
+builder.Services.AddSingleton<IAmazonSQS>(_ =>
+    AwsClientFactory.CreateSqsClient(builder.Configuration["Aws:Region"]!));
+
+// Dependency injection
+builder.Services.AddSingleton<SitePublisherJob>();
+builder.Services.AddSingleton<MessageHandler>();
+builder.Services.AddSingleton<OracleBulkExporter>();
+builder.Services.AddSingleton<SqsProcessor>();
+
+// Hangfire
+builder.Services.AddHangfire(cfg => cfg.UseMemoryStorage());
+builder.Services.AddHangfireServer();
+
+var app = builder.Build();
+
+// Schedule recurring publisher
+using (var scope = app.Services.CreateScope())
+{
+    var publisher = scope.ServiceProvider.GetRequiredService<SitePublisherJob>();
+    RecurringJob.AddOrUpdate("publish-sites", () => publisher.ExecuteAsync(), Cron.Daily);
+}
+
+// Start consumer job
+BackgroundJob.Enqueue<SqsProcessor>(x => x.RunAsync(CancellationToken.None));
+
+await app.RunAsync();
+AWSTemplateFormatVersion: '2010-09-09'
+Description: SQS queue + DLQ + IAM policy for SharePointBatchProcessor
+
+Resources:
+  SharePointDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: sharepoint-dlq
+      MessageRetentionPeriod: 1209600
+
+  SharePointQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: sharepoint-jobs
+      VisibilityTimeout: 900
+      ReceiveMessageWaitTimeSeconds: 20
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt SharePointDLQ.Arn
+        maxReceiveCount: 5
+
+  QueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref SharePointQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: "*"
+            Action: "sqs:*"
+            Resource: !GetAtt SharePointQueue.Arn
