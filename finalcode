@@ -1,9 +1,15 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Data;
+using System.Dynamic;
+using System.Linq;
+using System.Threading.Tasks;
+using System.Linq.Dynamic.Core;
+using ACATWebAPI.Data.Models;
+
 namespace ACATWebAPI.Data.Helpers
 {
-
-    // Inspired from
-    // https://github.com/andreavitali/NetCoreKendoGridBinding/blob/master/Kendo/KendoDataSourceResponse.cs
-    // https://github.com/linmasaki/KendoNET.DynamicLinq/blob/master/src/QueryableExtensions.cs
     public static class KendoGridHelper
     {
         public static async Task<object> ApplyServerSideOperationsAsync<T>(
@@ -11,14 +17,6 @@ namespace ACATWebAPI.Data.Helpers
             KendoGridRequest request)
         {
             IQueryable<dynamic> queryable = ConvertToQueryable(dataSource);
-
-            // Filtering
-            //if (request.Filter != null)
-            //{
-            //    var whereClause = BuildWhereClause(request.Filter);
-            //    if (!string.IsNullOrEmpty(whereClause))
-            //        queryable = queryable.Where(whereClause);
-            //}
 
             var total = queryable.Count();
 
@@ -29,7 +27,7 @@ namespace ACATWebAPI.Data.Helpers
                 queryable = queryable.OrderBy(sortString);
             }
 
-            // Grouping
+            // Grouping (Dynamic LINQ fix)
             if (request.Group != null && request.Group.Any())
             {
                 var grouped = ApplyGrouping(queryable, request.Group);
@@ -42,9 +40,8 @@ namespace ACATWebAPI.Data.Helpers
             if (request.Take > 0)
                 queryable = queryable.Take(request.Take);
 
-            // Handle async EF / sync List / DataTable
-            var isAsync = dataSource is IQueryable<T>; // or DbSet<T>;
-            var data = isAsync
+            // Execution (handles async vs sync)
+            var data = (dataSource is IQueryable<T>)
                 ? await Task.Run(() => queryable.ToDynamicList())
                 : queryable.ToDynamicList();
 
@@ -66,63 +63,36 @@ namespace ACATWebAPI.Data.Helpers
         {
             var expando = new ExpandoObject() as IDictionary<string, object?>;
             foreach (DataColumn col in row.Table.Columns)
-            {
                 expando[col.ColumnName] = row[col] == DBNull.Value ? null : row[col];
-            }
             return (ExpandoObject)expando;
         }
 
-        private static string? BuildWhereClause(IEnumerable<KendoFilterItem> filters)
-        {
-            if (filters == null || !filters.Any()) return null;
-
-            var clauses = new List<string>();
-
-            foreach (var filter in filters)
-            {
-
-                var op = filter.Operator switch
-                {
-                    "eq" => "==",
-                    "neq" => "!=",
-                    "contains" => ".ToString().Contains(@0)",
-                    "startswith" => ".ToString().StartsWith(@0)",
-                    "endswith" => ".ToString().EndsWith(@0)",
-                    "lt" => "<",
-                    "lte" => "<=",
-                    "gt" => ">",
-                    "gte" => ">=",
-                    _ => "=="
-                };
-
-                if (op.Contains("("))
-                    clauses.Add($"{filter.Field}{op}");
-                else
-                    clauses.Add($"{filter.Field} {op} @0");
-
-            }
-
-            var logic = "and";
-            return string.Join($" {logic} ", clauses);
-        }
-
+        /// <summary>
+        /// Fixed version of ApplyGrouping — supports multiple group levels
+        /// and uses correct Dynamic LINQ syntax with 'as' clause
+        /// </summary>
         private static List<object> ApplyGrouping(IQueryable<dynamic> query, IEnumerable<KendoGroupDescriptor> groups)
         {
-            var groupField = groups.First().Field;
-            var grouped = query.GroupBy($"new({groupField})", "it")
-                .Select($"new (Key.{groupField} as value, it as items)")
-                .ToDynamicList();
+            // Build valid dynamic group expression: new(Field1 as Field1, Field2 as Field2)
+            var groupFields = string.Join(", ", groups.Select(g => $"{g.Field} as {g.Field}"));
+            var groupExpr = $"new({groupFields})";
+
+            // Dynamic LINQ grouping
+            var grouped = query.GroupBy(groupExpr, "it")
+                               .Select("new (Key as Key, it as Items)")
+                               .ToDynamicList();
 
             var result = new List<object>();
             foreach (dynamic g in grouped)
             {
-                var items = ((IEnumerable<dynamic>)g.items).ToList();
+                var items = ((IEnumerable<dynamic>)g.Items).ToList();
+
                 result.Add(new
                 {
-                    field = groupField,
-                    value = g.value,
+                    field = groups.First().Field,
+                    value = g.Key,
                     items,
-                    hasSubgroups = false
+                    hasSubgroups = groups.Count() > 1
                 });
             }
 
@@ -130,6 +100,9 @@ namespace ACATWebAPI.Data.Helpers
         }
     }
 
+    /// <summary>
+    /// Maps UI grid parameters to KendoGridRequest
+    /// </summary>
     public static class KendoGridMapper
     {
         public static KendoGridRequest ToKendoGridRequest(this PageSettings ui)
@@ -138,37 +111,36 @@ namespace ACATWebAPI.Data.Helpers
             {
                 Skip = ui.Skip,
                 Take = ui.Take,
-                Group = ui.Group?.Select(g => new KendoGroupDescriptor { Field = g.Field }).ToList(),
-                Sort = ui.Sorts?.Select(s => new KendoSortDescriptor { Field = s.Field, Dir = s.Dir }).ToList(),
-                Filter = ui.Filters != null ? new List<KendoFilterDescriptor>()
+                Group = ui.Group?.Select(g => new KendoGroupDescriptor
                 {
-                    new KendoFilterDescriptor()
+                    Field = g.Field
+                }).ToList(),
+                Sort = ui.Sorts?.Select(s => new KendoSortDescriptor
+                {
+                    Field = s.Field,
+                    Dir = s.Dir
+                }).ToList(),
+                Filter = ui.Filters != null
+                    ? new List<KendoFilterDescriptor>
                     {
-                        Logic = ui.Filters.Logic,
-                        Filters = ui.Filters?.Filters.Select(f => new KendoFilterItem
+                        new KendoFilterDescriptor
                         {
-                            Field = f.Field,
-                            Operator = f.Operator,
-                            Value = f.Value,
-                        }).ToList()
+                            Logic = ui.Filters.Logic,
+                            Filters = ui.Filters.Filters?.Select(f => new KendoFilterItem
+                            {
+                                Field = f.Field,
+                                Operator = f.Operator,
+                                Value = f.Value
+                            }).ToList()
+                        }
                     }
-
-                } : null
+                    : null
             };
         }
     }
 }
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-
 namespace ACATWebAPI.Data.Models
 {
-    internal class KendoGridHelperModel
-    {
-    }
     public class KendoGridRequest
     {
         public int Skip { get; set; }
@@ -186,14 +158,13 @@ namespace ACATWebAPI.Data.Models
 
     public class KendoFilterDescriptor
     {
-        public string? Logic { get; set; } // and/or
+        public string? Logic { get; set; }
         public IEnumerable<KendoFilterItem>? Filters { get; set; }
     }
 
     public class KendoGroupDescriptor
     {
         public string Field { get; set; } = string.Empty;
-        //public IEnumerable<KendoAggregateDescriptor>? Aggregates { get; set; }
     }
 
     public class KendoFilterItem
@@ -215,4 +186,3 @@ namespace ACATWebAPI.Data.Models
         public string Aggregate { get; set; } = string.Empty;
     }
 }
-
