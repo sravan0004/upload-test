@@ -1,296 +1,218 @@
-public class HeaderConfig
+namespace ACATWebAPI.Data.Helpers
 {
-    public bool Required { get; set; }
-    public string Type { get; set; } // string, date, number
 
-    // Optional extra rules
-    public string Format { get; set; }      // for dates
-    public int? Min { get; set; }           // for numbers
-    public int? Max { get; set; }           // for numbers
-    public int? MaxLength { get; set; }     // for strings
-    public string Regex { get; set; }       // custom validation
-}
-
-
-using System.Text.RegularExpressions;
-
-public static class ExcelValidator
-{
-    public static List<ExcelRecord> ValidateData(DataTable dt, string jsonConfigPath)
+    // Inspired from
+    // https://github.com/andreavitali/NetCoreKendoGridBinding/blob/master/Kendo/KendoDataSourceResponse.cs
+    // https://github.com/linmasaki/KendoNET.DynamicLinq/blob/master/src/QueryableExtensions.cs
+    public static class KendoGridHelper
     {
-        var config = JsonConvert.DeserializeObject<Dictionary<string, HeaderConfig>>(
-            File.ReadAllText(jsonConfigPath));
-
-        var records = new List<ExcelRecord>();
-        var headerRow = dt.Rows[0];
-        var questionRow = dt.Rows[1];
-
-        for (int r = 2; r < dt.Rows.Count; r++) // answers start at row 3
+        public static async Task<object> ApplyServerSideOperationsAsync<T>(
+            object dataSource,
+            KendoGridRequest request)
         {
-            var row = dt.Rows[r];
-            for (int c = 0; c < dt.Columns.Count; c++)
+            IQueryable<dynamic> queryable = ConvertToQueryable(dataSource);
+
+            // Filtering
+            //if (request.Filter != null)
+            //{
+            //    var whereClause = BuildWhereClause(request.Filter);
+            //    if (!string.IsNullOrEmpty(whereClause))
+            //        queryable = queryable.Where(whereClause);
+            //}
+
+            var total = queryable.Count();
+
+            // Sorting
+            if (request.Sort != null && request.Sort.Any())
             {
-                string headerId = headerRow[c]?.ToString()?.Trim();
-                string questionText = questionRow[c]?.ToString()?.Trim();
-                string value = row[c]?.ToString()?.Trim();
+                var sortString = string.Join(",", request.Sort.Select(s => $"{s.Field} {s.Dir}"));
+                queryable = queryable.OrderBy(sortString);
+            }
 
-                if (string.IsNullOrEmpty(headerId)) continue;
+            // Grouping
+            if (request.Group != null && request.Group.Any())
+            {
+                var grouped = ApplyGrouping(queryable, request.Group);
+                return new { data = grouped, total };
+            }
 
-                var record = new ExcelRecord
+            // Paging
+            if (request.Skip > 0)
+                queryable = queryable.Skip(request.Skip);
+            if (request.Take > 0)
+                queryable = queryable.Take(request.Take);
+
+            // Handle async EF / sync List / DataTable
+            var isAsync = dataSource is IQueryable<T>; // or DbSet<T>;
+            var data = isAsync
+                ? await Task.Run(() => queryable.ToDynamicList())
+                : queryable.ToDynamicList();
+
+            return new { data, total };
+        }
+
+        private static IQueryable<dynamic> ConvertToQueryable(object source)
+        {
+            return source switch
+            {
+                IQueryable q => q.Cast<dynamic>(),
+                IEnumerable<object> list => list.AsQueryable().Cast<dynamic>(),
+                DataTable dt => dt.AsEnumerable().Select(ToExpando).AsQueryable(),
+                _ => throw new InvalidOperationException("Unsupported data source type")
+            };
+        }
+
+        private static ExpandoObject ToExpando(DataRow row)
+        {
+            var expando = new ExpandoObject() as IDictionary<string, object?>;
+            foreach (DataColumn col in row.Table.Columns)
+            {
+                expando[col.ColumnName] = row[col] == DBNull.Value ? null : row[col];
+            }
+            return (ExpandoObject)expando;
+        }
+
+        private static string? BuildWhereClause(IEnumerable<KendoFilterItem> filters)
+        {
+            if (filters == null || !filters.Any()) return null;
+
+            var clauses = new List<string>();
+
+            foreach (var filter in filters)
+            {
+
+                var op = filter.Operator switch
                 {
-                    Id = headerId,
-                    RowId = r - 1,
-                    QuestionText = questionText,
-                    Value = value,
-                    ErrorMsg = ""
+                    "eq" => "==",
+                    "neq" => "!=",
+                    "contains" => ".ToString().Contains(@0)",
+                    "startswith" => ".ToString().StartsWith(@0)",
+                    "endswith" => ".ToString().EndsWith(@0)",
+                    "lt" => "<",
+                    "lte" => "<=",
+                    "gt" => ">",
+                    "gte" => ">=",
+                    _ => "=="
                 };
 
-                if (config.TryGetValue(headerId, out var headerCfg))
-                {
-                    // 1. Required check
-                    if (headerCfg.Required && string.IsNullOrEmpty(value))
-                    {
-                        record.ErrorMsg = $"Missing required answer for '{headerId}'";
-                    }
+                if (op.Contains("("))
+                    clauses.Add($"{filter.Field}{op}");
+                else
+                    clauses.Add($"{filter.Field} {op} @0");
 
-                    // 2. Type + Format checks
-                    if (!string.IsNullOrEmpty(value))
+            }
+
+            var logic = "and";
+            return string.Join($" {logic} ", clauses);
+        }
+
+        private static List<object> ApplyGrouping(IQueryable<dynamic> query, IEnumerable<KendoGroupDescriptor> groups)
+        {
+            var groupField = groups.First().Field;
+            var grouped = query.GroupBy($"new({groupField})", "it")
+                .Select($"new (Key.{groupField} as value, it as items)")
+                .ToDynamicList();
+
+            var result = new List<object>();
+            foreach (dynamic g in grouped)
+            {
+                var items = ((IEnumerable<dynamic>)g.items).ToList();
+                result.Add(new
+                {
+                    field = groupField,
+                    value = g.value,
+                    items,
+                    hasSubgroups = false
+                });
+            }
+
+            return result;
+        }
+    }
+
+    public static class KendoGridMapper
+    {
+        public static KendoGridRequest ToKendoGridRequest(this PageSettings ui)
+        {
+            return new KendoGridRequest
+            {
+                Skip = ui.Skip,
+                Take = ui.Take,
+                Group = ui.Group?.Select(g => new KendoGroupDescriptor { Field = g.Field }).ToList(),
+                Sort = ui.Sorts?.Select(s => new KendoSortDescriptor { Field = s.Field, Dir = s.Dir }).ToList(),
+                Filter = ui.Filters != null ? new List<KendoFilterDescriptor>()
+                {
+                    new KendoFilterDescriptor()
                     {
-                        switch (headerCfg.Type?.ToLower())
+                        Logic = ui.Filters.Logic,
+                        Filters = ui.Filters?.Filters.Select(f => new KendoFilterItem
                         {
-                            case "date":
-                                if (!DateTime.TryParseExact(
-                                        value,
-                                        headerCfg.Format ?? "MM/dd/yyyy",
-                                        null,
-                                        System.Globalization.DateTimeStyles.None,
-                                        out _))
-                                {
-                                    record.ErrorMsg = $"Invalid date format for '{headerId}'. Expected {headerCfg.Format ?? "MM/dd/yyyy"}";
-                                }
-                                break;
-
-                            case "number":
-                                if (!decimal.TryParse(value, out var num))
-                                {
-                                    record.ErrorMsg = $"Invalid number for '{headerId}'";
-                                }
-                                else
-                                {
-                                    if (headerCfg.Min.HasValue && num < headerCfg.Min.Value)
-                                        record.ErrorMsg = $"Value for '{headerId}' is less than Min {headerCfg.Min}";
-                                    if (headerCfg.Max.HasValue && num > headerCfg.Max.Value)
-                                        record.ErrorMsg = $"Value for '{headerId}' is greater than Max {headerCfg.Max}";
-                                }
-                                break;
-
-                            case "string":
-                            default:
-                                if (headerCfg.MaxLength.HasValue && value.Length > headerCfg.MaxLength.Value)
-                                    record.ErrorMsg = $"'{headerId}' exceeds max length {headerCfg.MaxLength}";
-
-                                if (!string.IsNullOrEmpty(headerCfg.Regex) &&
-                                    !Regex.IsMatch(value, headerCfg.Regex))
-                                    record.ErrorMsg = $"'{headerId}' does not match required pattern";
-                                break;
-                        }
-                    }
-                }
-
-                records.Add(record);
-            }
-        }
-
-        return records;
-    }
-}
-
-
-public class ValidationError
-{
-    public int RowId { get; set; }
-    public string ColumnId { get; set; }
-    public string Message { get; set; }
-}
-
-
-public static class ExcelValidator
-{
-    public static List<ExcelRecord> ValidateData(DataTable dt, string jsonConfigPath)
-    {
-        var config = JsonConvert.DeserializeObject<Dictionary<string, HeaderConfig>>(
-            File.ReadAllText(jsonConfigPath));
-
-        var records = new List<ExcelRecord>();
-        var headerRow = dt.Rows[0];
-        var questionRow = dt.Rows[1];
-
-        for (int r = 2; r < dt.Rows.Count; r++) // answers start at row 3
-        {
-            var row = dt.Rows[r];
-            for (int c = 0; c < dt.Columns.Count; c++)
-            {
-                string headerId = headerRow[c]?.ToString()?.Trim();
-                string questionText = questionRow[c]?.ToString()?.Trim();
-                string value = row[c]?.ToString()?.Trim();
-
-                if (string.IsNullOrEmpty(headerId)) continue;
-
-                var record = new ExcelRecord
-                {
-                    Id = headerId,
-                    RowId = r - 1,
-                    QuestionText = questionText,
-                    Value = value,
-                    ErrorMsg = ""
-                };
-
-                if (config.TryGetValue(headerId, out var headerCfg))
-                {
-                    // Required check
-                    if (headerCfg.Required && string.IsNullOrEmpty(value))
-                    {
-                        record.ErrorMsg = $"Missing required answer for '{headerId}'";
+                            Field = f.Field,
+                            Operator = f.Operator,
+                            Value = f.Value,
+                        }).ToList()
                     }
 
-                    // Type validation
-                    if (!string.IsNullOrEmpty(value))
-                    {
-                        switch (headerCfg.Type?.ToLower())
-                        {
-                            case "date":
-                                if (!DateTime.TryParse(value, out _))
-                                    record.ErrorMsg = $"Invalid date format for '{headerId}'";
-                                break;
-                            case "number":
-                                if (!decimal.TryParse(value, out _))
-                                    record.ErrorMsg = $"Invalid number format for '{headerId}'";
-                                break;
-                            case "string":
-                            default:
-                                break;
-                        }
-                    }
-                }
-
-                records.Add(record);
-            }
+                } : null
+            };
         }
-
-        return records;
     }
 }
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
 
-
-using System.Data;
-using ExcelDataReader;
-
-public static class ExcelHelper
+namespace ACATWebAPI.Data.Models
 {
-    public static DataTable ReadExcelToDataTable(string filePath)
+    internal class KendoGridHelperModel
     {
-        using var stream = File.Open(filePath, FileMode.Open, FileAccess.Read);
-        using var reader = ExcelReaderFactory.CreateReader(stream);
-
-        var result = reader.AsDataSet(new ExcelDataSetConfiguration
-        {
-            ConfigureDataTable = _ => new ExcelDataTableConfiguration
-            {
-                UseHeaderRow = false // we handle headers manually
-            }
-        });
-
-        return result.Tables[0]; // assuming first sheet
     }
-}
-
-using Newtonsoft.Json;
-
-public static class ExcelValidator
-{
-    public static List<string> ValidateHeaders(DataTable dt, string jsonConfigPath)
+    public class KendoGridRequest
     {
-        var errors = new List<string>();
-        var config = JsonConvert.DeserializeObject<Dictionary<string, HeaderConfig>>(
-            File.ReadAllText(jsonConfigPath));
-
-        var headerRow = dt.Rows[0];
-        for (int col = 0; col < dt.Columns.Count; col++)
-        {
-            string headerId = headerRow[col]?.ToString()?.Trim();
-            if (string.IsNullOrEmpty(headerId)) continue;
-
-            if (!config.ContainsKey(headerId))
-                errors.Add($"Unexpected header ID '{headerId}' in column {col + 1}");
-        }
-
-        return errors;
+        public int Skip { get; set; }
+        public int Take { get; set; }
+        public IEnumerable<KendoSortDescriptor>? Sort { get; set; }
+        public IEnumerable<KendoFilterDescriptor>? Filter { get; set; }
+        public IEnumerable<KendoGroupDescriptor>? Group { get; set; }
     }
 
-    public static List<ExcelRecord> ValidateData(DataTable dt, string jsonConfigPath)
+    public class KendoSortDescriptor
     {
-        var config = JsonConvert.DeserializeObject<Dictionary<string, HeaderConfig>>(
-            File.ReadAllText(jsonConfigPath));
+        public string Field { get; set; } = string.Empty;
+        public string Dir { get; set; } = "asc";
+    }
 
-        var records = new List<ExcelRecord>();
-        var headerRow = dt.Rows[0];
-        var questionRow = dt.Rows[1];
+    public class KendoFilterDescriptor
+    {
+        public string? Logic { get; set; } // and/or
+        public IEnumerable<KendoFilterItem>? Filters { get; set; }
+    }
 
-        for (int r = 2; r < dt.Rows.Count; r++) // answers start at row 3
-        {
-            var row = dt.Rows[r];
-            for (int c = 0; c < dt.Columns.Count; c++)
-            {
-                string headerId = headerRow[c]?.ToString()?.Trim();
-                string questionText = questionRow[c]?.ToString()?.Trim();
-                string value = row[c]?.ToString()?.Trim();
+    public class KendoGroupDescriptor
+    {
+        public string Field { get; set; } = string.Empty;
+        //public IEnumerable<KendoAggregateDescriptor>? Aggregates { get; set; }
+    }
 
-                if (string.IsNullOrEmpty(headerId)) continue;
+    public class KendoFilterItem
+    {
+        public string Field { get; set; } = string.Empty;
+        public string Operator { get; set; } = string.Empty;
+        public object? Value { get; set; }
+    }
 
-                var record = new ExcelRecord
-                {
-                    Id = headerId,
-                    RowId = r - 1, // user row index
-                    QuestionText = questionText,
-                    Value = value,
-                    ErrorMsg = ""
-                };
+    public class DataSourceResult
+    {
+        public object? Data { get; set; }
+        public int Total { get; set; }
+    }
 
-                // Required field check
-                if (config.TryGetValue(headerId, out var headerCfg) && headerCfg.Required)
-                {
-                    if (string.IsNullOrEmpty(value))
-                    {
-                        record.ErrorMsg = $"Missing required answer for '{headerId}'";
-                    }
-                }
-
-                records.Add(record);
-            }
-        }
-
-        return records;
+    public class KendoAggregateDescriptor
+    {
+        public string Field { get; set; } = string.Empty;
+        public string Aggregate { get; set; } = string.Empty;
     }
 }
-string excelPath = @"C:\Temp\EcRf-Template.xlsx";
-string configPath = @"C:\Temp\header-config.json";
 
-// Step 1: Read to DataTable
-DataTable dt = ExcelHelper.ReadExcelToDataTable(excelPath);
-
-// Step 2a: Validate headers
-var headerErrors = ExcelValidator.ValidateHeaders(dt, configPath);
-if (headerErrors.Any())
-{
-    Console.WriteLine("Header Errors:");
-    headerErrors.ForEach(Console.WriteLine);
-}
-
-// Step 2b: Validate data
-var records = ExcelValidator.ValidateData(dt, configPath);
-
-// Print errors
-foreach (var rec in records.Where(r => !string.IsNullOrEmpty(r.ErrorMsg)))
-{
-    Console.WriteLine($"Row {rec.RowId}, {rec.Id}: {rec.ErrorMsg}");
-}
