@@ -1,165 +1,97 @@
-using System;
-using System.Collections;
-using System.Collections.Generic;
-using System.Data;
-using System.Dynamic;
-using System.Linq;
-using System.Linq.Dynamic.Core;
-using System.Threading.Tasks;
-
-public static class KendoGridHelper
+private static IQueryable<dynamic> ApplyFiltering(IQueryable<dynamic> query, IEnumerable<KendoFilterDescriptor> filters)
 {
-    public static async Task<object> ApplyServerSideOperationsAsync<T>(
-        object dataSource,
-        KendoGridRequest request)
-    {
-        IQueryable<dynamic> queryable = ConvertToQueryable(dataSource);
+    var allPredicates = new List<string>();
+    var allValues = new List<object>();
 
-        // ✅ 1. Apply filtering first
-        if (request.Filter != null && request.Filter.Any())
+    foreach (var descriptor in filters)
+    {
+        if (descriptor.Filters == null) continue;
+
+        var (predicate, values) = BuildFilterPredicate(descriptor);
+        if (!string.IsNullOrWhiteSpace(predicate))
         {
-            queryable = ApplyFiltering(queryable, request.Filter);
+            allPredicates.Add(predicate);
+            allValues.AddRange(values);
+        }
+    }
+
+    if (!allPredicates.Any())
+        return query;
+
+    var whereClause = string.Join(" and ", allPredicates);
+    return query.Where(whereClause, allValues.ToArray());
+}
+
+
+private static (string Predicate, List<object> Values) BuildFilterPredicate(KendoFilterDescriptor descriptor)
+{
+    var parts = new List<string>();
+    var values = new List<object>();
+
+    foreach (var f in descriptor.Filters ?? Enumerable.Empty<KendoFilterItem>())
+    {
+        var idx = values.Count;
+        string predicate;
+
+        // Simplified operator handling: works across all types
+        switch (f.Operator)
+        {
+            case "eq":
+                predicate = $"{f.Field} == @{idx}";
+                break;
+            case "neq":
+                predicate = $"{f.Field} != @{idx}";
+                break;
+            case "gt":
+                predicate = $"{f.Field} > @{idx}";
+                break;
+            case "gte":
+                predicate = $"{f.Field} >= @{idx}";
+                break;
+            case "lt":
+                predicate = $"{f.Field} < @{idx}";
+                break;
+            case "lte":
+                predicate = $"{f.Field} <= @{idx}";
+                break;
+            case "contains":
+                // safest possible — works for any object type
+                predicate = $"Convert.ToString({f.Field}).Contains(@{idx})";
+                break;
+            case "doesnotcontain":
+                predicate = $"!Convert.ToString({f.Field}).Contains(@{idx})";
+                break;
+            case "startswith":
+                predicate = $"Convert.ToString({f.Field}).StartsWith(@{idx})";
+                break;
+            case "endswith":
+                predicate = $"Convert.ToString({f.Field}).EndsWith(@{idx})";
+                break;
+            default:
+                predicate = $"{f.Field} == @{idx}";
+                break;
         }
 
-        var total = queryable.Count();
+        parts.Add(predicate);
 
-        // ✅ 2. Apply sorting
-        if (request.Sort != null && request.Sort.Any())
+        // Normalize values (parse dates / numbers if needed)
+        if (f.Value is JsonElement jsonValue)
         {
-            var sortString = string.Join(",", request.Sort.Select(s => $"{s.Field} {s.Dir}"));
-            queryable = queryable.OrderBy(sortString);
+            if (jsonValue.ValueKind == JsonValueKind.String && DateTime.TryParse(jsonValue.GetString(), out var dt))
+                values.Add(dt);
+            else if (jsonValue.ValueKind == JsonValueKind.Number)
+                values.Add(jsonValue.GetDecimal());
+            else
+                values.Add(jsonValue.ToString());
         }
-
-        // ✅ 3. Materialize before grouping
-        var list = await Task.Run(() => queryable.ToDynamicList());
-
-        // ✅ 4. Apply grouping (in-memory)
-        if (request.Group != null && request.Group.Any())
+        else
         {
-            var grouped = ApplyGrouping(list.AsQueryable(), request.Group);
-            return new { data = grouped, total };
+            values.Add(f.Value ?? DBNull.Value);
         }
-
-        // ✅ 5. Paging
-        var paged = list.Skip(request.Skip).Take(request.Take);
-
-        return new { data = paged, total };
     }
 
-    // -- Filtering --
-    private static IQueryable<dynamic> ApplyFiltering(IQueryable<dynamic> query, IEnumerable<KendoFilterDescriptor> filters)
-    {
-        var allPredicates = new List<string>();
-        var allValues = new List<object>();
+    var logic = string.IsNullOrEmpty(descriptor.Logic) ? "and" : descriptor.Logic.ToLowerInvariant();
+    var predicate = string.Join($" {logic} ", parts);
 
-        foreach (var descriptor in filters)
-        {
-            if (descriptor.Filters == null) continue;
-
-            var (predicate, values) = BuildFilterPredicate(descriptor);
-            if (!string.IsNullOrWhiteSpace(predicate))
-            {
-                allPredicates.Add(predicate);
-                allValues.AddRange(values);
-            }
-        }
-
-        if (!allPredicates.Any())
-            return query;
-
-        var whereClause = string.Join(" and ", allPredicates);
-        return query.Where(whereClause, allValues.ToArray());
-    }
-
-    private static (string Predicate, List<object> Values) BuildFilterPredicate(KendoFilterDescriptor descriptor)
-    {
-        var parts = new List<string>();
-        var values = new List<object>();
-
-        if (descriptor.Filters == null)
-            return ("", values);
-
-        foreach (var f in descriptor.Filters)
-        {
-            var idx = values.Count;
-            string part = f.Operator switch
-            {
-                "eq" => $"{f.Field} == @{idx}",
-                "neq" => $"{f.Field} != @{idx}",
-                "gt" => $"{f.Field} > @{idx}",
-                "gte" => $"{f.Field} >= @{idx}",
-                "lt" => $"{f.Field} < @{idx}",
-                "lte" => $"{f.Field} <= @{idx}",
-                "contains" => $"{f.Field}.ToString().Contains(@{idx})",
-                "doesnotcontain" => $"!{f.Field}.ToString().Contains(@{idx})",
-                "startswith" => $"{f.Field}.ToString().StartsWith(@{idx})",
-                "endswith" => $"{f.Field}.ToString().EndsWith(@{idx})",
-                _ => $"{f.Field} == @{idx}"
-            };
-
-            parts.Add(part);
-            values.Add(f.Value ?? "");
-        }
-
-        var logic = string.IsNullOrEmpty(descriptor.Logic) ? "and" : descriptor.Logic;
-        var predicate = string.Join($" {logic} ", parts);
-
-        return (predicate, values);
-    }
-
-    // -- Grouping (unchanged) --
-    private static List<object> ApplyGrouping(IQueryable<dynamic> query, IEnumerable<KendoGroupDescriptor> groups)
-    {
-        if (groups == null || !groups.Any())
-            return query.ToDynamicList<object>();
-
-        var first = groups.First();
-        var grouped = query.AsEnumerable()
-            .GroupBy(x => GetPropValue(x, first.Field))
-            .Select(g => new
-            {
-                field = first.Field,
-                value = g.Key,
-                items = groups.Count() > 1
-                    ? ApplyGrouping(g.AsQueryable(), groups.Skip(1))
-                    : g.ToList()
-            }).ToList<object>();
-
-        return grouped;
-    }
-
-    private static object? GetPropValue(object obj, string propName)
-    {
-        if (obj == null || string.IsNullOrEmpty(propName))
-            return null;
-
-        if (obj is IDictionary<string, object> dict)
-        {
-            dict.TryGetValue(propName, out var value);
-            return value;
-        }
-
-        var prop = obj.GetType().GetProperty(propName);
-        return prop?.GetValue(obj, null);
-    }
-
-    // -- Helper for source conversion --
-    private static IQueryable<dynamic> ConvertToQueryable(object source)
-    {
-        return source switch
-        {
-            IQueryable q => q.Cast<dynamic>(),
-            IEnumerable<object> list => list.AsQueryable().Cast<dynamic>(),
-            DataTable dt => dt.AsEnumerable().Select(ToExpando).AsQueryable(),
-            _ => throw new InvalidOperationException("Unsupported data source type")
-        };
-    }
-
-    private static ExpandoObject ToExpando(DataRow row)
-    {
-        var expando = new ExpandoObject() as IDictionary<string, object?>;
-        foreach (DataColumn col in row.Table.Columns)
-            expando[col.ColumnName] = row[col] == DBNull.Value ? null : row[col];
-        return (ExpandoObject)expando;
-    }
+    return (predicate, values);
 }
