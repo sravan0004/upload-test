@@ -4,185 +4,162 @@ using System.Collections.Generic;
 using System.Data;
 using System.Dynamic;
 using System.Linq;
-using System.Threading.Tasks;
 using System.Linq.Dynamic.Core;
-using ACATWebAPI.Data.Models;
+using System.Threading.Tasks;
 
-namespace ACATWebAPI.Data.Helpers
+public static class KendoGridHelper
 {
-    public static class KendoGridHelper
+    public static async Task<object> ApplyServerSideOperationsAsync<T>(
+        object dataSource,
+        KendoGridRequest request)
     {
-        public static async Task<object> ApplyServerSideOperationsAsync<T>(
-            object dataSource,
-            KendoGridRequest request)
+        IQueryable<dynamic> queryable = ConvertToQueryable(dataSource);
+
+        // ✅ 1. Apply filtering first
+        if (request.Filter != null && request.Filter.Any())
         {
-            IQueryable<dynamic> queryable = ConvertToQueryable(dataSource);
-
-            var total = queryable.Count();
-
-            // Sorting
-            if (request.Sort != null && request.Sort.Any())
-            {
-                var sortString = string.Join(",", request.Sort.Select(s => $"{s.Field} {s.Dir}"));
-                queryable = queryable.OrderBy(sortString);
-            }
-
-            // Grouping (Dynamic LINQ fix)
-            if (request.Group != null && request.Group.Any())
-            {
-                var grouped = ApplyGrouping(queryable, request.Group);
-                return new { data = grouped, total };
-            }
-
-            // Paging
-            if (request.Skip > 0)
-                queryable = queryable.Skip(request.Skip);
-            if (request.Take > 0)
-                queryable = queryable.Take(request.Take);
-
-            // Execution (handles async vs sync)
-            var data = (dataSource is IQueryable<T>)
-                ? await Task.Run(() => queryable.ToDynamicList())
-                : queryable.ToDynamicList();
-
-            return new { data, total };
+            queryable = ApplyFiltering(queryable, request.Filter);
         }
 
-        private static IQueryable<dynamic> ConvertToQueryable(object source)
+        var total = queryable.Count();
+
+        // ✅ 2. Apply sorting
+        if (request.Sort != null && request.Sort.Any())
         {
-            return source switch
+            var sortString = string.Join(",", request.Sort.Select(s => $"{s.Field} {s.Dir}"));
+            queryable = queryable.OrderBy(sortString);
+        }
+
+        // ✅ 3. Materialize before grouping
+        var list = await Task.Run(() => queryable.ToDynamicList());
+
+        // ✅ 4. Apply grouping (in-memory)
+        if (request.Group != null && request.Group.Any())
+        {
+            var grouped = ApplyGrouping(list.AsQueryable(), request.Group);
+            return new { data = grouped, total };
+        }
+
+        // ✅ 5. Paging
+        var paged = list.Skip(request.Skip).Take(request.Take);
+
+        return new { data = paged, total };
+    }
+
+    // -- Filtering --
+    private static IQueryable<dynamic> ApplyFiltering(IQueryable<dynamic> query, IEnumerable<KendoFilterDescriptor> filters)
+    {
+        var allPredicates = new List<string>();
+        var allValues = new List<object>();
+
+        foreach (var descriptor in filters)
+        {
+            if (descriptor.Filters == null) continue;
+
+            var (predicate, values) = BuildFilterPredicate(descriptor);
+            if (!string.IsNullOrWhiteSpace(predicate))
             {
-                IQueryable q => q.Cast<dynamic>(),
-                IEnumerable<object> list => list.AsQueryable().Cast<dynamic>(),
-                DataTable dt => dt.AsEnumerable().Select(ToExpando).AsQueryable(),
-                _ => throw new InvalidOperationException("Unsupported data source type")
+                allPredicates.Add(predicate);
+                allValues.AddRange(values);
+            }
+        }
+
+        if (!allPredicates.Any())
+            return query;
+
+        var whereClause = string.Join(" and ", allPredicates);
+        return query.Where(whereClause, allValues.ToArray());
+    }
+
+    private static (string Predicate, List<object> Values) BuildFilterPredicate(KendoFilterDescriptor descriptor)
+    {
+        var parts = new List<string>();
+        var values = new List<object>();
+
+        if (descriptor.Filters == null)
+            return ("", values);
+
+        foreach (var f in descriptor.Filters)
+        {
+            var idx = values.Count;
+            string part = f.Operator switch
+            {
+                "eq" => $"{f.Field} == @{idx}",
+                "neq" => $"{f.Field} != @{idx}",
+                "gt" => $"{f.Field} > @{idx}",
+                "gte" => $"{f.Field} >= @{idx}",
+                "lt" => $"{f.Field} < @{idx}",
+                "lte" => $"{f.Field} <= @{idx}",
+                "contains" => $"{f.Field}.ToString().Contains(@{idx})",
+                "doesnotcontain" => $"!{f.Field}.ToString().Contains(@{idx})",
+                "startswith" => $"{f.Field}.ToString().StartsWith(@{idx})",
+                "endswith" => $"{f.Field}.ToString().EndsWith(@{idx})",
+                _ => $"{f.Field} == @{idx}"
             };
+
+            parts.Add(part);
+            values.Add(f.Value ?? "");
         }
 
-        private static ExpandoObject ToExpando(DataRow row)
-        {
-            var expando = new ExpandoObject() as IDictionary<string, object?>;
-            foreach (DataColumn col in row.Table.Columns)
-                expando[col.ColumnName] = row[col] == DBNull.Value ? null : row[col];
-            return (ExpandoObject)expando;
-        }
+        var logic = string.IsNullOrEmpty(descriptor.Logic) ? "and" : descriptor.Logic;
+        var predicate = string.Join($" {logic} ", parts);
 
-        /// <summary>
-        /// Fixed version of ApplyGrouping — supports multiple group levels
-        /// and uses correct Dynamic LINQ syntax with 'as' clause
-        /// </summary>
-        private static List<object> ApplyGrouping(IQueryable<dynamic> query, IEnumerable<KendoGroupDescriptor> groups)
-        {
-            // Build valid dynamic group expression: new(Field1 as Field1, Field2 as Field2)
-            var groupFields = string.Join(", ", groups.Select(g => $"{g.Field} as {g.Field}"));
-            var groupExpr = $"new({groupFields})";
+        return (predicate, values);
+    }
 
-            // Dynamic LINQ grouping
-            var grouped = query.GroupBy(groupExpr, "it")
-                               .Select("new (Key as Key, it as Items)")
-                               .ToDynamicList();
+    // -- Grouping (unchanged) --
+    private static List<object> ApplyGrouping(IQueryable<dynamic> query, IEnumerable<KendoGroupDescriptor> groups)
+    {
+        if (groups == null || !groups.Any())
+            return query.ToDynamicList<object>();
 
-            var result = new List<object>();
-            foreach (dynamic g in grouped)
+        var first = groups.First();
+        var grouped = query.AsEnumerable()
+            .GroupBy(x => GetPropValue(x, first.Field))
+            .Select(g => new
             {
-                var items = ((IEnumerable<dynamic>)g.Items).ToList();
+                field = first.Field,
+                value = g.Key,
+                items = groups.Count() > 1
+                    ? ApplyGrouping(g.AsQueryable(), groups.Skip(1))
+                    : g.ToList()
+            }).ToList<object>();
 
-                result.Add(new
-                {
-                    field = groups.First().Field,
-                    value = g.Key,
-                    items,
-                    hasSubgroups = groups.Count() > 1
-                });
-            }
-
-            return result;
-        }
+        return grouped;
     }
 
-    /// <summary>
-    /// Maps UI grid parameters to KendoGridRequest
-    /// </summary>
-    public static class KendoGridMapper
+    private static object? GetPropValue(object obj, string propName)
     {
-        public static KendoGridRequest ToKendoGridRequest(this PageSettings ui)
+        if (obj == null || string.IsNullOrEmpty(propName))
+            return null;
+
+        if (obj is IDictionary<string, object> dict)
         {
-            return new KendoGridRequest
-            {
-                Skip = ui.Skip,
-                Take = ui.Take,
-                Group = ui.Group?.Select(g => new KendoGroupDescriptor
-                {
-                    Field = g.Field
-                }).ToList(),
-                Sort = ui.Sorts?.Select(s => new KendoSortDescriptor
-                {
-                    Field = s.Field,
-                    Dir = s.Dir
-                }).ToList(),
-                Filter = ui.Filters != null
-                    ? new List<KendoFilterDescriptor>
-                    {
-                        new KendoFilterDescriptor
-                        {
-                            Logic = ui.Filters.Logic,
-                            Filters = ui.Filters.Filters?.Select(f => new KendoFilterItem
-                            {
-                                Field = f.Field,
-                                Operator = f.Operator,
-                                Value = f.Value
-                            }).ToList()
-                        }
-                    }
-                    : null
-            };
+            dict.TryGetValue(propName, out var value);
+            return value;
         }
-    }
-}
-namespace ACATWebAPI.Data.Models
-{
-    public class KendoGridRequest
-    {
-        public int Skip { get; set; }
-        public int Take { get; set; }
-        public IEnumerable<KendoSortDescriptor>? Sort { get; set; }
-        public IEnumerable<KendoFilterDescriptor>? Filter { get; set; }
-        public IEnumerable<KendoGroupDescriptor>? Group { get; set; }
+
+        var prop = obj.GetType().GetProperty(propName);
+        return prop?.GetValue(obj, null);
     }
 
-    public class KendoSortDescriptor
+    // -- Helper for source conversion --
+    private static IQueryable<dynamic> ConvertToQueryable(object source)
     {
-        public string Field { get; set; } = string.Empty;
-        public string Dir { get; set; } = "asc";
+        return source switch
+        {
+            IQueryable q => q.Cast<dynamic>(),
+            IEnumerable<object> list => list.AsQueryable().Cast<dynamic>(),
+            DataTable dt => dt.AsEnumerable().Select(ToExpando).AsQueryable(),
+            _ => throw new InvalidOperationException("Unsupported data source type")
+        };
     }
 
-    public class KendoFilterDescriptor
+    private static ExpandoObject ToExpando(DataRow row)
     {
-        public string? Logic { get; set; }
-        public IEnumerable<KendoFilterItem>? Filters { get; set; }
-    }
-
-    public class KendoGroupDescriptor
-    {
-        public string Field { get; set; } = string.Empty;
-    }
-
-    public class KendoFilterItem
-    {
-        public string Field { get; set; } = string.Empty;
-        public string Operator { get; set; } = string.Empty;
-        public object? Value { get; set; }
-    }
-
-    public class DataSourceResult
-    {
-        public object? Data { get; set; }
-        public int Total { get; set; }
-    }
-
-    public class KendoAggregateDescriptor
-    {
-        public string Field { get; set; } = string.Empty;
-        public string Aggregate { get; set; } = string.Empty;
+        var expando = new ExpandoObject() as IDictionary<string, object?>;
+        foreach (DataColumn col in row.Table.Columns)
+            expando[col.ColumnName] = row[col] == DBNull.Value ? null : row[col];
+        return (ExpandoObject)expando;
     }
 }
