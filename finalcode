@@ -1,97 +1,142 @@
-private static IQueryable<dynamic> ApplyFiltering(IQueryable<dynamic> query, IEnumerable<KendoFilterDescriptor> filters)
+using System.Text.Json;
+using System.Linq.Dynamic.Core;
+
+public static class KendoGridHelper
 {
-    var allPredicates = new List<string>();
-    var allValues = new List<object>();
-
-    foreach (var descriptor in filters)
+    public static IQueryable<T> ApplyFiltering<T>(IQueryable<T> query, IEnumerable<KendoFilterDescriptor> filters)
     {
-        if (descriptor.Filters == null) continue;
+        if (filters == null || !filters.Any())
+            return query;
 
-        var (predicate, values) = BuildFilterPredicate(descriptor);
-        if (!string.IsNullOrWhiteSpace(predicate))
+        var allPredicates = new List<string>();
+        var allValues = new List<object>();
+
+        foreach (var descriptor in filters)
         {
-            allPredicates.Add(predicate);
-            allValues.AddRange(values);
+            var (predicate, values) = BuildFilterPredicate<T>(descriptor);
+            if (!string.IsNullOrWhiteSpace(predicate))
+            {
+                allPredicates.Add(predicate);
+                allValues.AddRange(values);
+            }
         }
+
+        if (!allPredicates.Any())
+            return query;
+
+        var whereClause = string.Join(" and ", allPredicates);
+        return query.Where(whereClause, allValues.ToArray());
     }
 
-    if (!allPredicates.Any())
-        return query;
 
-    var whereClause = string.Join(" and ", allPredicates);
-    return query.Where(whereClause, allValues.ToArray());
-}
-
-
-private static (string Predicate, List<object> Values) BuildFilterPredicate(KendoFilterDescriptor descriptor)
-{
-    var parts = new List<string>();
-    var values = new List<object>();
-
-    foreach (var f in descriptor.Filters ?? Enumerable.Empty<KendoFilterItem>())
+    private static (string Predicate, List<object> Values) BuildFilterPredicate<T>(KendoFilterDescriptor descriptor)
     {
-        var idx = values.Count;
-        string predicate;
+        var parts = new List<string>();
+        var values = new List<object>();
 
-        // Simplified operator handling: works across all types
-        switch (f.Operator)
+        foreach (var f in descriptor.Filters ?? Enumerable.Empty<KendoFilterItem>())
         {
-            case "eq":
-                predicate = $"{f.Field} == @{idx}";
-                break;
-            case "neq":
-                predicate = $"{f.Field} != @{idx}";
-                break;
-            case "gt":
-                predicate = $"{f.Field} > @{idx}";
-                break;
-            case "gte":
-                predicate = $"{f.Field} >= @{idx}";
-                break;
-            case "lt":
-                predicate = $"{f.Field} < @{idx}";
-                break;
-            case "lte":
-                predicate = $"{f.Field} <= @{idx}";
-                break;
-            case "contains":
-                // safest possible — works for any object type
-                predicate = $"Convert.ToString({f.Field}).Contains(@{idx})";
-                break;
-            case "doesnotcontain":
-                predicate = $"!Convert.ToString({f.Field}).Contains(@{idx})";
-                break;
-            case "startswith":
-                predicate = $"Convert.ToString({f.Field}).StartsWith(@{idx})";
-                break;
-            case "endswith":
-                predicate = $"Convert.ToString({f.Field}).EndsWith(@{idx})";
-                break;
-            default:
-                predicate = $"{f.Field} == @{idx}";
-                break;
+            var idx = values.Count;
+            string predicate = string.Empty;
+
+            // detect type of property if possible
+            var prop = typeof(T).GetProperty(f.Field);
+            var propType = prop?.PropertyType ?? typeof(string);
+            var nonNullableType = Nullable.GetUnderlyingType(propType) ?? propType;
+
+            bool isString = nonNullableType == typeof(string);
+            bool isDate = nonNullableType == typeof(DateTime);
+            bool isNumeric = nonNullableType.IsPrimitive && nonNullableType != typeof(bool) || nonNullableType == typeof(decimal);
+
+            // choose expression based on operator
+            switch (f.Operator)
+            {
+                case "eq":
+                    predicate = $"{f.Field} == @{idx}";
+                    break;
+                case "neq":
+                    predicate = $"{f.Field} != @{idx}";
+                    break;
+                case "gt":
+                    predicate = $"{f.Field} > @{idx}";
+                    break;
+                case "gte":
+                    predicate = $"{f.Field} >= @{idx}";
+                    break;
+                case "lt":
+                    predicate = $"{f.Field} < @{idx}";
+                    break;
+                case "lte":
+                    predicate = $"{f.Field} <= @{idx}";
+                    break;
+                case "contains":
+                    if (isString)
+                        predicate = $"{f.Field}.Contains(@{idx})";
+                    else
+                        predicate = $"Convert.ToString({f.Field}).Contains(@{idx})";
+                    break;
+                case "doesnotcontain":
+                    if (isString)
+                        predicate = $"!{f.Field}.Contains(@{idx})";
+                    else
+                        predicate = $"!Convert.ToString({f.Field}).Contains(@{idx})";
+                    break;
+                case "startswith":
+                    if (isString)
+                        predicate = $"{f.Field}.StartsWith(@{idx})";
+                    else
+                        predicate = $"Convert.ToString({f.Field}).StartsWith(@{idx})";
+                    break;
+                case "endswith":
+                    if (isString)
+                        predicate = $"{f.Field}.EndsWith(@{idx})";
+                    else
+                        predicate = $"Convert.ToString({f.Field}).EndsWith(@{idx})";
+                    break;
+                default:
+                    predicate = $"{f.Field} == @{idx}";
+                    break;
+            }
+
+            // Convert value to appropriate type
+            object parsedValue = ParseValue(f.Value, nonNullableType, isDate, isNumeric);
+            values.Add(parsedValue);
+
+            parts.Add(predicate);
         }
 
-        parts.Add(predicate);
-
-        // Normalize values (parse dates / numbers if needed)
-        if (f.Value is JsonElement jsonValue)
-        {
-            if (jsonValue.ValueKind == JsonValueKind.String && DateTime.TryParse(jsonValue.GetString(), out var dt))
-                values.Add(dt);
-            else if (jsonValue.ValueKind == JsonValueKind.Number)
-                values.Add(jsonValue.GetDecimal());
-            else
-                values.Add(jsonValue.ToString());
-        }
-        else
-        {
-            values.Add(f.Value ?? DBNull.Value);
-        }
+        var logic = string.IsNullOrEmpty(descriptor.Logic) ? "and" : descriptor.Logic.ToLowerInvariant();
+        return (string.Join($" {logic} ", parts), values);
     }
 
-    var logic = string.IsNullOrEmpty(descriptor.Logic) ? "and" : descriptor.Logic.ToLowerInvariant();
-    var predicate = string.Join($" {logic} ", parts);
 
-    return (predicate, values);
+    private static object ParseValue(object value, Type targetType, bool isDate, bool isNumeric)
+    {
+        if (value == null) return DBNull.Value;
+
+        if (value is JsonElement json)
+        {
+            if (isDate && json.ValueKind == JsonValueKind.String && DateTime.TryParse(json.GetString(), out var dt))
+                return dt;
+
+            if (isNumeric && json.ValueKind == JsonValueKind.Number)
+            {
+                if (targetType == typeof(int)) return json.GetInt32();
+                if (targetType == typeof(long)) return json.GetInt64();
+                if (targetType == typeof(decimal)) return json.GetDecimal();
+                if (targetType == typeof(double)) return json.GetDouble();
+            }
+
+            return json.ToString();
+        }
+
+        // Already parsed (Angular sends proper types sometimes)
+        if (isDate && DateTime.TryParse(value.ToString(), out var date))
+            return date;
+
+        if (isNumeric && decimal.TryParse(value.ToString(), out var num))
+            return Convert.ChangeType(num, targetType);
+
+        return value;
+    }
 }
