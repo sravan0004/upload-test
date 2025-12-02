@@ -1,0 +1,719 @@
+CREATE DEFINER=`user1`@`%` PROCEDURE `sharepoint_sync_specimen`(
+	IN mPROCESS_ID VARCHAR(100)
+)
+BEGIN
+    DECLARE v_ErrorCount INT DEFAULT 0;
+    DECLARE v_ErrorMsg LONGTEXT;
+    DECLARE v_DupesSpecimenCount INT DEFAULT 0;
+    DECLARE v_PanelID INT DEFAULT 0;
+    DECLARE v_CountryCode VARCHAR(10);
+    DECLARE v_ShortCode VARCHAR(10);
+    DECLARE v_SiteName VARCHAR(50);
+    DECLARE v_PanelIdentifier VARCHAR(50);
+    DECLARE v_SpecimenCount INT DEFAULT 0;    
+    
+		-- PROCESS STUDYTYPE: VERIFY EXISTS OR NOT
+		UPDATE stage_specimen AS s
+			LEFT JOIN
+		study_type AS st ON TRIM(s.Study) = st.STUDY_NAME 
+			SET s.ERROR_MSG = IF(st.STUDY_ID IS NULL,
+				CONCAT('Error - No matching Study Type Code (',
+						s.Study,
+						') found in Database. '),
+				s.ERROR_MSG) WHERE s.process_id = mPROCESS_ID;
+				
+
+        -- INVALID DATA
+        UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''),
+					' Error - Invalid value ''',(s.SERUM_VOLUME),''' for Serum Specimen Volume. Value should be less than 1000.')
+		WHERE (
+		  LENGTH(SUBSTRING_INDEX(s.SERUM_VOLUME, '.', 1)) > 3
+		  OR
+		  (LOCATE('.', s.SERUM_VOLUME) > 0 AND LENGTH(SUBSTRING_INDEX(s.SERUM_VOLUME, '.', -1)) > 2)
+		) AND s.PROCESS_ID = mPROCESS_ID;					
+			
+		UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''),
+					' Error - Invalid value ''',(s.PLASMA_VOLUME),''' for Plasma Specimen Volume. Value should be less than 1000.')
+		WHERE (
+		  LENGTH(SUBSTRING_INDEX(s.PLASMA_VOLUME, '.', 1)) > 3
+		  OR
+		  (LOCATE('.', s.PLASMA_VOLUME) > 0 AND LENGTH(SUBSTRING_INDEX(s.PLASMA_VOLUME, '.', -1)) > 2)
+		) AND s.PROCESS_ID = mPROCESS_ID;
+		
+        UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''),
+					' Error - Invalid value ''',(s.WHOLE_BLOOD_VOLUME),''' for White blood Specimen Volume. Value should be less than 1000.')
+		WHERE (
+		  LENGTH(SUBSTRING_INDEX(s.WHOLE_BLOOD_VOLUME, '.', 1)) > 3
+		  OR
+		  (LOCATE('.', s.WHOLE_BLOOD_VOLUME) > 0 AND LENGTH(SUBSTRING_INDEX(s.WHOLE_BLOOD_VOLUME, '.', -1)) > 2)
+		) AND s.PROCESS_ID = mPROCESS_ID;
+        
+        UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''),
+					' Error - Invalid value ''',(s.VTM_VOLUME),''' for VTM Specimen Volume. Value should be less than 1000.')
+		WHERE (
+		  LENGTH(SUBSTRING_INDEX(s.VTM_VOLUME, '.', 1)) > 3
+		  OR
+		  (LOCATE('.', s.VTM_VOLUME) > 0 AND LENGTH(SUBSTRING_INDEX(s.VTM_VOLUME, '.', -1)) > 2)
+		) AND s.PROCESS_ID = mPROCESS_ID;	
+        
+        UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''),
+					' Error - Invalid value ''',(s.CULTURE_VOLUME),''' for Culture Specimen Volume. Value should be less than 1000.')
+		WHERE (
+		  LENGTH(SUBSTRING_INDEX(s.CULTURE_VOLUME, '.', 1)) > 3
+		  OR
+		  (LOCATE('.', s.CULTURE_VOLUME) > 0 AND LENGTH(SUBSTRING_INDEX(s.CULTURE_VOLUME, '.', -1)) > 2)
+		) AND s.PROCESS_ID = mPROCESS_ID;	
+        
+        UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''),
+					' Error - Invalid value ''',(s.URINE_VOLUME),''' for Urine Specimen Volume. Value should be less than 1000.')
+		WHERE (
+		  LENGTH(SUBSTRING_INDEX(s.URINE_VOLUME, '.', 1)) > 3
+		  OR
+		  (LOCATE('.', s.URINE_VOLUME) > 0 AND LENGTH(SUBSTRING_INDEX(s.URINE_VOLUME, '.', -1)) > 2)
+		) AND s.PROCESS_ID = mPROCESS_ID;	
+        
+        UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''),
+					' Error - Invalid value ''',(s.STOOL_VOLUME),''' for Stool Specimen Volume. Value should be less than 1000.')
+		WHERE (
+		  LENGTH(SUBSTRING_INDEX(s.STOOL_VOLUME, '.', 1)) > 3
+		  OR
+		  (LOCATE('.', s.STOOL_VOLUME) > 0 AND LENGTH(SUBSTRING_INDEX(s.STOOL_VOLUME, '.', -1)) > 2)
+		) AND s.PROCESS_ID = mPROCESS_ID;
+        
+        UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''),
+					' Error - Invalid value ''',(s.CSF_VOLUME),''' for CSF Specimen Volume. Value should be less than 1000.')
+		WHERE (
+		  LENGTH(SUBSTRING_INDEX(s.CSF_VOLUME, '.', 1)) > 3
+		  OR
+		  (LOCATE('.', s.CSF_VOLUME) > 0 AND LENGTH(SUBSTRING_INDEX(s.CSF_VOLUME, '.', -1)) > 2)
+		) AND s.PROCESS_ID = mPROCESS_ID;
+        
+        UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''),
+					' Error - Invalid value ''',(s.SPUTUM_VOLUME),''' for Sputum Specimen Volume. Value should be less than 1000.')
+		WHERE (
+		  LENGTH(SUBSTRING_INDEX(s.SPUTUM_VOLUME, '.', 1)) > 3
+		  OR
+		  (LOCATE('.', s.SPUTUM_VOLUME) > 0 AND LENGTH(SUBSTRING_INDEX(s.SPUTUM_VOLUME, '.', -1)) > 2)
+		) AND s.PROCESS_ID = mPROCESS_ID;
+        
+        UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''),
+					' Error - Invalid value ''',(s.RESPIRATORY_SWAB_VOLUME),''' for Respiratory Swab Specimen Volume. Value should be less than 1000.')
+		WHERE (
+		  LENGTH(SUBSTRING_INDEX(s.RESPIRATORY_SWAB_VOLUME, '.', 1)) > 3
+		  OR
+		  (LOCATE('.', s.RESPIRATORY_SWAB_VOLUME) > 0 AND LENGTH(SUBSTRING_INDEX(s.RESPIRATORY_SWAB_VOLUME, '.', -1)) > 2)
+		) AND s.PROCESS_ID = mPROCESS_ID;
+        
+        UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''),
+					' Error - Invalid value ''',(s.SKIN_LESION_SWAB_VOLUME),''' for Skin Lesion Swab Specimen Volume. Value should be less than 1000.')
+		WHERE (
+		  LENGTH(SUBSTRING_INDEX(s.SKIN_LESION_SWAB_VOLUME, '.', 1)) > 3
+		  OR
+		  (LOCATE('.', s.SKIN_LESION_SWAB_VOLUME) > 0 AND LENGTH(SUBSTRING_INDEX(s.SKIN_LESION_SWAB_VOLUME, '.', -1)) > 2)
+		) AND s.PROCESS_ID = mPROCESS_ID;
+        
+        UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''),
+					' Error - Invalid value ''',(s.CERVICAL_SWAB_VOLUME),''' for Cervical Swab Specimen Volume. Value should be less than 1000.')
+		WHERE (
+		  LENGTH(SUBSTRING_INDEX(s.CERVICAL_SWAB_VOLUME, '.', 1)) > 3
+		  OR
+		  (LOCATE('.', s.CERVICAL_SWAB_VOLUME) > 0 AND LENGTH(SUBSTRING_INDEX(s.CERVICAL_SWAB_VOLUME, '.', -1)) > 2)
+		) AND s.PROCESS_ID = mPROCESS_ID;
+        
+        UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''),
+					' Error - Invalid value ''',(s.INSECT_POOLS_VOLUME),''' for Insect pool Specimen Volume. Value should be less than 1000.')
+		WHERE (
+		  LENGTH(SUBSTRING_INDEX(s.INSECT_POOLS_VOLUME, '.', 1)) > 3
+		  OR
+		  (LOCATE('.', s.INSECT_POOLS_VOLUME) > 0 AND LENGTH(SUBSTRING_INDEX(s.INSECT_POOLS_VOLUME, '.', -1)) > 2)
+		) AND s.PROCESS_ID = mPROCESS_ID;
+        
+        UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''),
+					' Error - Invalid value ''',(s.WASTE_WATER_VOLUME),''' for Waste water Specimen Volume. Value should be less than 1000.')
+		WHERE (
+		  LENGTH(SUBSTRING_INDEX(s.WASTE_WATER_VOLUME, '.', 1)) > 3
+		  OR
+		  (LOCATE('.', s.WASTE_WATER_VOLUME) > 0 AND LENGTH(SUBSTRING_INDEX(s.WASTE_WATER_VOLUME, '.', -1)) > 2)
+		) AND s.PROCESS_ID = mPROCESS_ID;
+        
+        UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''),
+					' Error - Invalid value ''',(s.OTHER_VOLUME),''' for Other Specimen Volume. Value should be less than 1000.')
+		WHERE (
+		  LENGTH(SUBSTRING_INDEX(s.OTHER_VOLUME, '.', 1)) > 3
+		  OR
+		  (LOCATE('.', s.OTHER_VOLUME) > 0 AND LENGTH(SUBSTRING_INDEX(s.OTHER_VOLUME, '.', -1)) > 2)
+		) AND s.PROCESS_ID = mPROCESS_ID;
+        
+        UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''),
+					' Error - Invalid value ''',(s.UNKNOWN_VOLUME),''' for Other Specimen Volume. Value should be less than 1000.')
+		WHERE (
+		  LENGTH(SUBSTRING_INDEX(s.UNKNOWN_VOLUME, '.', 1)) > 3
+		  OR
+		  (LOCATE('.', s.UNKNOWN_VOLUME) > 0 AND LENGTH(SUBSTRING_INDEX(s.UNKNOWN_VOLUME, '.', -1)) > 2)
+		) AND s.PROCESS_ID = mPROCESS_ID;
+        
+        
+		UPDATE stage_specimen s
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''),
+					' Error - Invalid value ''',(s.Age),''' for Age.')
+			WHERE 
+			  NOT ((
+				(s.Age BETWEEN 0 AND 999) 
+                -- OR (s.Age BETWEEN 1 AND 999 AND s.Age = FLOOR(s.Age))
+			  )			  
+		  OR s.Age NOT REGEXP '^[0-9]+(\.[0-9]+)?$') AND s.PROCESS_ID = mPROCESS_ID;	
+          
+        -- required field validation
+        UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''), ' Error - The specimen identifier is required but not found.')
+		WHERE (s.SPECIMEN_IDENTIFIER IS NULL OR s.SPECIMEN_IDENTIFIER = '') AND s.PROCESS_ID = mPROCESS_ID;
+	
+		UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''), ' Error - The Deidentified Patient ID is required but not found.')
+		WHERE (s.DEIDENTIFIED_PATIENT_ID IS NULL OR s.DEIDENTIFIED_PATIENT_ID = '') AND s.PROCESS_ID = mPROCESS_ID;
+        
+        -- length validations        
+         UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''), ' Error - Length of Study Code is invalid.')
+		WHERE LENGTH(s.study) > 50 AND s.PROCESS_ID = mPROCESS_ID;
+        
+        UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''), ' Error - Length of Deidentified PatientId invalid.')
+		WHERE LENGTH(s.DEIDENTIFIED_PATIENT_ID) > 100 AND s.PROCESS_ID = mPROCESS_ID;
+        
+        UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''), ' Error - Length of Specimen Identifier invalid.')
+		WHERE LENGTH(s.SPECIMEN_IDENTIFIER) > 200 AND s.PROCESS_ID = mPROCESS_ID;
+        
+        UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''), ' Error - Length of TotalSpecimenVolume(mL) invalid.')
+		WHERE LENGTH(s.TOTAL_SPECIMEN_VOLUME) > 6 AND s.PROCESS_ID = mPROCESS_ID;        
+        
+        UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''), ' Error - Length of NoOfAliquots invalid.')
+		WHERE LENGTH(s.NO_OF_ALIQUOTS) > 9 AND s.PROCESS_ID = mPROCESS_ID;
+        
+         UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''), ' Error - Length of City invalid.')
+		WHERE LENGTH(s.City) > 100 AND s.PROCESS_ID = mPROCESS_ID;
+        
+        UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''), ' Error - Length of Collection Site invalid.')
+		WHERE LENGTH(s.COLLECTION_SITE) > 200 AND s.PROCESS_ID = mPROCESS_ID;
+        
+        UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''), ' Error - Length of Collection Site invalid.')
+		WHERE LENGTH(s.COLLECTION_SITE) > 200 AND s.PROCESS_ID = mPROCESS_ID;
+        
+        UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''), ' Error - Length of Clinic Type invalid.')
+		WHERE LENGTH(s.CLINIC_TYPE) > 200 AND s.PROCESS_ID = mPROCESS_ID;
+        
+		UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''), ' Error - Length of Comments invalid.')
+		WHERE LENGTH(s.COMMENTS) > 2000 AND s.PROCESS_ID = mPROCESS_ID;
+        
+    	UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''), ' Error - Length of Sex invalid.')
+		WHERE LENGTH(s.Sex) > 10 AND s.PROCESS_ID = mPROCESS_ID;
+               
+        UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''), ' Error - Invalid value ''',(s.Age),''' for Age.')
+		WHERE (
+		  LENGTH(SUBSTRING_INDEX(s.Age, '.', 1)) > 3
+		  OR
+		  (LOCATE('.', s.Age) > 0 AND LENGTH(SUBSTRING_INDEX(s.Age, '.', -1)) > 2)
+		) AND s.PROCESS_ID = mPROCESS_ID;
+        
+		UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''), ' Error - Length of Sample Type invalid.')
+		WHERE LENGTH(s.SAMPLE_TYPE) > 2000 AND s.PROCESS_ID = mPROCESS_ID;
+        
+		-- DUPLICATE SPECIMENS IDENTIFIER
+		UPDATE stage_specimen s
+			JOIN
+				(
+					SELECT specimen_identifier
+					FROM stage_specimen 
+                    WHERE PROCESS_ID = mPROCESS_ID
+                    GROUP BY specimen_identifier
+                    HAVING COUNT(*) > 1
+				) AS dup ON s.specimen_identifier = dup.specimen_identifier
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''),
+					' Error - Duplicate entry detected for the Specimen Identifier (',
+					s.specimen_identifier,
+					'). ')
+			WHERE s.PROCESS_ID = mPROCESS_ID;
+            
+		-- DUPLICATE DEIDENTIFIED_PATIENT_ID
+        UPDATE stage_specimen s
+			JOIN
+				(
+					SELECT deidentified_patient_id
+					FROM stage_specimen 
+                    WHERE PROCESS_ID = mPROCESS_ID
+                    GROUP BY deidentified_patient_id
+                    HAVING COUNT(*) > 1
+				) AS dup ON s.deidentified_patient_id = dup.deidentified_patient_id
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''),
+					' Error - Duplicate entry detected for the Deidentified Patient ID (',
+					s.deidentified_patient_id,
+					'). ')
+			WHERE s.PROCESS_ID = mPROCESS_ID;
+            
+         -- DUPLICATE SPECIMEN IDENTIFIER + DEIDENTIFIED_PATIENT_ID
+		 UPDATE stage_specimen s
+			JOIN
+				(
+					SELECT specimen_identifier, deidentified_patient_id
+					FROM stage_specimen 
+                    WHERE PROCESS_ID = mPROCESS_ID
+                    GROUP BY specimen_identifier, deidentified_patient_id
+                    HAVING COUNT(*) > 1
+				) AS dup ON s.specimen_identifier = dup.specimen_identifier AND
+					   s.deidentified_patient_id = dup.deidentified_patient_id
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''),
+					' Error - Duplicate entry detected for the combination of Specimen Identifier & Deidentified Patient ID (',
+					s.specimen_identifier,', ', s.deidentified_patient_id,
+					'). ')
+			WHERE s.PROCESS_ID = mPROCESS_ID;
+        
+		-- DUPLICATE SPECIMEN IDENTIFIER Stage table vs Actual table
+		UPDATE stage_specimen s
+			JOIN
+		specimen sp ON s.specimen_identifier = sp.specimen_identifier
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''),
+					' Error - Specimen Identifier (',
+					s.specimen_identifier, ') already exists in the database. ')
+		WHERE
+			(sp.DELETED IS NULL OR sp.DELETED = 0) AND s.PROCESS_ID = mPROCESS_ID;
+            
+		-- DUPLICATE SPECIMEN IDENTIFIER + DEIDENTIFIED_PATIENT_ID in Stage table vs Actual table
+		UPDATE stage_specimen s
+			JOIN
+		specimen sp ON s.specimen_identifier = sp.specimen_identifier AND
+					   s.deidentified_patient_id = sp.deidentified_patient_id
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''),
+					' Error - The combination of Specimen Identifier & Deidentified Patient ID (',
+					s.specimen_identifier,', ', s.deidentified_patient_id,
+					') already exists in the database. ')
+		WHERE
+			(sp.DELETED IS NULL OR sp.DELETED = 0) AND s.PROCESS_ID = mPROCESS_ID;
+            
+		UPDATE stage_specimen s 
+			SET s.ERROR_MSG = CONCAT(COALESCE(s.ERROR_MSG, ''),
+					' Error - No Specimen Volume(s) are provided.')
+		WHERE 
+			(SERUM_VOLUME IS NULL AND PLASMA_VOLUME IS NULL AND 
+			WHOLE_BLOOD_VOLUME IS NULL AND  VTM_VOLUME IS NULL AND 
+			CULTURE_VOLUME IS NULL AND  URINE_VOLUME IS NULL AND 
+			STOOL_VOLUME IS NULL AND  CSF_VOLUME IS NULL AND 
+			SPUTUM_VOLUME IS NULL AND  RESPIRATORY_SWAB_VOLUME IS NULL AND 
+			SKIN_LESION_SWAB_VOLUME IS NULL AND  CERVICAL_SWAB_VOLUME IS NULL AND 
+			INSECT_POOLS_VOLUME IS NULL AND  WASTE_WATER_VOLUME IS NULL AND 
+			OTHER_VOLUME IS NULL AND  UNKNOWN_VOLUME IS NULL)
+        AND s.PROCESS_ID = mPROCESS_ID;
+        
+        -- RETURN ERROR
+		SELECT 
+			COUNT(*)
+		INTO v_ErrorCount FROM
+			stage_specimen s
+		WHERE
+			ERROR_MSG IS NOT NULL AND s.process_id = mPROCESS_ID;
+            
+		-- EXIT
+		IF v_ErrorCount > 0 THEN
+			SELECT CONCAT('Row# ', s.ROW_NUMBER, ' ', TRIM(s.ERROR_MSG)) As MSG, 0 As RECORD_CNT, NULL AS SUCCESS_MSG from stage_specimen s WHERE ERROR_MSG IS NOT NULL AND s.process_id = mPROCESS_ID;                				
+		ELSE            
+			UPDATE stage_specimen
+				SET SAMPLE_TYPE = 
+					CONCAT_WS(',', 
+						CASE WHEN SERUM_VOLUME IS NOT NULL THEN get_sample_type_code('Serum') END,
+						CASE WHEN PLASMA_VOLUME IS NOT NULL THEN get_sample_type_code('Plasma') END,
+						CASE WHEN WHOLE_BLOOD_VOLUME IS NOT NULL THEN get_sample_type_code('Whole Blood') END,
+						CASE WHEN VTM_VOLUME IS NOT NULL THEN get_sample_type_code('VTM') END,
+						CASE WHEN CULTURE_VOLUME IS NOT NULL THEN get_sample_type_code('Culture') END,
+						CASE WHEN URINE_VOLUME IS NOT NULL THEN get_sample_type_code('Urine') END,
+						CASE WHEN STOOL_VOLUME IS NOT NULL THEN get_sample_type_code('Stool') END,
+						CASE WHEN CSF_VOLUME IS NOT NULL THEN get_sample_type_code('CSF') END,
+						CASE WHEN SPUTUM_VOLUME IS NOT NULL THEN get_sample_type_code('Sputum') END,
+						CASE WHEN RESPIRATORY_SWAB_VOLUME IS NOT NULL THEN get_sample_type_code('Respiratory Swab') END,
+						CASE WHEN SKIN_LESION_SWAB_VOLUME IS NOT NULL THEN get_sample_type_code('Skin Lesion Swab') END,
+						CASE WHEN CERVICAL_SWAB_VOLUME IS NOT NULL THEN get_sample_type_code('Cervical Swab') END,
+						CASE WHEN INSECT_POOLS_VOLUME IS NOT NULL THEN get_sample_type_code('Insect pools') END,
+						CASE WHEN WASTE_WATER_VOLUME IS NOT NULL THEN get_sample_type_code('Waste Water') END,
+						CASE WHEN OTHER_VOLUME IS NOT NULL THEN get_sample_type_code('Other') END,
+						CASE WHEN UNKNOWN_VOLUME IS NOT NULL THEN get_sample_type_code('Unknown') END
+					)
+					WHERE (SERUM_VOLUME IS NOT NULL
+						OR PLASMA_VOLUME IS NOT NULL
+						OR WHOLE_BLOOD_VOLUME IS NOT NULL
+						OR VTM_VOLUME IS NOT NULL
+						OR CULTURE_VOLUME IS NOT NULL
+						OR URINE_VOLUME IS NOT NULL
+						OR STOOL_VOLUME IS NOT NULL
+						OR CSF_VOLUME IS NOT NULL
+						OR SPUTUM_VOLUME IS NOT NULL
+						OR RESPIRATORY_SWAB_VOLUME IS NOT NULL
+						OR SKIN_LESION_SWAB_VOLUME IS NOT NULL
+						OR CERVICAL_SWAB_VOLUME IS NOT NULL
+						OR INSECT_POOLS_VOLUME IS NOT NULL
+						OR WASTE_WATER_VOLUME IS NOT NULL
+						OR OTHER_VOLUME IS NOT NULL
+						OR UNKNOWN_VOLUME IS NOT NULL) AND PROCESS_ID = mPROCESS_ID; 	
+                
+                
+		 UPDATE stage_specimen
+			SET SAMPLE_TYPE_VALUE = 				
+				CONCAT_WS(',', 
+					CASE WHEN SERUM_VOLUME IS NOT NULL THEN 'Serum' END,
+					CASE WHEN PLASMA_VOLUME IS NOT NULL THEN 'Plasma' END,
+					CASE WHEN WHOLE_BLOOD_VOLUME IS NOT NULL THEN 'Whole Blood' END,
+					CASE WHEN VTM_VOLUME IS NOT NULL THEN 'VTM' END,
+					CASE WHEN CULTURE_VOLUME IS NOT NULL THEN 'Culture' END,
+					CASE WHEN URINE_VOLUME IS NOT NULL THEN 'Urine' END,
+					CASE WHEN STOOL_VOLUME IS NOT NULL THEN 'Stool' END,
+					CASE WHEN CSF_VOLUME IS NOT NULL THEN 'CSF' END,
+					CASE WHEN SPUTUM_VOLUME IS NOT NULL THEN 'Sputum' END,
+					CASE WHEN RESPIRATORY_SWAB_VOLUME IS NOT NULL THEN 'Respiratory Swab' END,
+					CASE WHEN SKIN_LESION_SWAB_VOLUME IS NOT NULL THEN 'Skin Lesion Swab' END,
+					CASE WHEN CERVICAL_SWAB_VOLUME IS NOT NULL THEN 'Cervical Swab' END,
+					CASE WHEN INSECT_POOLS_VOLUME IS NOT NULL THEN 'Insect pools' END,
+					CASE WHEN WASTE_WATER_VOLUME IS NOT NULL THEN 'Waste Water' END,
+					CASE WHEN OTHER_VOLUME IS NOT NULL THEN 'Other' END,
+					CASE WHEN UNKNOWN_VOLUME IS NOT NULL THEN 'Unknown' END
+				)
+				WHERE (SERUM_VOLUME IS NOT NULL
+					OR PLASMA_VOLUME IS NOT NULL
+					OR WHOLE_BLOOD_VOLUME IS NOT NULL
+					OR VTM_VOLUME IS NOT NULL
+					OR CULTURE_VOLUME IS NOT NULL
+					OR URINE_VOLUME IS NOT NULL
+					OR STOOL_VOLUME IS NOT NULL
+					OR CSF_VOLUME IS NOT NULL
+					OR SPUTUM_VOLUME IS NOT NULL
+					OR RESPIRATORY_SWAB_VOLUME IS NOT NULL
+					OR SKIN_LESION_SWAB_VOLUME IS NOT NULL
+					OR CERVICAL_SWAB_VOLUME IS NOT NULL
+					OR INSECT_POOLS_VOLUME IS NOT NULL
+					OR WASTE_WATER_VOLUME IS NOT NULL
+					OR OTHER_VOLUME IS NOT NULL
+					OR UNKNOWN_VOLUME IS NOT NULL) AND Process_ID = mPROCESS_ID; 	
+                    
+				-- PROCESS STARTS HERE
+				SELECT 
+					SITE_SHORT_CODE, SITE_COUNTRY_CODE, SITE_NAME
+				INTO v_ShortCode , v_CountryCode , v_SiteName FROM
+					stage_specimen s WHERE s.PROCESS_ID = mPROCESS_ID
+				LIMIT 1; 
+			
+				-- UPDATE SAMPLE TYPE VALUE IN STAGE TABLE
+				Update  stage_specimen s1
+					JOIN 
+					(
+						SELECT s.stg_Specimen_id, Group_concat(st.sample_name) as Final_Val from stage_specimen s  INNER JOIN  numbers n  ON LENGTH(REPLACE(sample_type, ',' , '')) <= LENGTH(sample_type)-n.num
+					  Left join sample_type st ON SUBSTRING_INDEX(SUBSTRING_INDEX(sample_type, ',', n.num+1), ',', -1) = CASE
+								WHEN LENGTH(st.SAMPLE_TYPE_CODE) = 1 THEN CONCAT('0', st.SAMPLE_TYPE_CODE)
+								ELSE st.SAMPLE_TYPE_CODE END GROUP BY s.stg_Specimen_id
+					)s2
+				on s1.stg_Specimen_id = s2.stg_Specimen_id 
+				set s1.SAMPLE_TYPE_VALUE = s2.Final_Val WHERE s1.process_id = mPROCESS_ID;
+
+			SELECT CONCAT(v_ShortCode, DATE_FORMAT(NOW(),'%Y%m%d%H%i%s')) INTO v_PanelIdentifier;
+            
+			-- INSERT SUCCESSFUL ROWS INTO PANEL & SPECIMEN
+			INSERT INTO `panel`
+				(`COUNTRY`,
+				`PANEL_DATE`,
+				`PANEL_IDENTIFIER`,
+				`Source`,
+				`CREATED`,
+				`CREATED_BY`,
+				`MODIFIED`,
+				`MODIFIED_BY`)
+				VALUES
+				(
+				  v_CountryCode,
+				  NOW(),
+				  v_PanelIdentifier,
+				  v_SiteName,
+				  NOW(),
+				  NULL,
+				  NULL,
+				  NULL
+				);
+
+			SELECT LAST_INSERT_ID() INTO v_PanelID;
+
+			INSERT INTO `specimen`
+					(`AGE`,
+					`CLINIC`,
+					`DISPOSITION_STATUS`,
+					`DRAW_DATE`,
+					`PLASMA_BOX_NBR`,					
+					`SEX`,
+					`SITE`,
+					`SORT_NUMBER`,
+					`SPECIMEN_COMMENT`,
+					`SPECIMEN_COUNTRY`,
+					`SPECIMEN_IDENTIFIER`,
+					`WHOLE_BLOOD_ALIQUOT`,
+					`WHOLE_BLOOD_BOX_NBR`,
+					`PANEL_ID`,
+					`DELETED`,
+					`NUMBER_OF_ALIQUOTS`,
+					`SEQUENCE_COUNT`,
+					`SEQUENCE_DISPLAY_TEXT`,
+					`SPECIMEN_TEST_RUN_COUNT`,
+					`SPECIMEN_TEST_RUN_DISPLAY_TEXT`,
+					`FREEZER_ITEM_COUNT`,
+					`FREEZER_ITEM_DISPLAY_TEXT`,
+					`CREATED`,
+					`CREATED_BY`,
+					`MODIFIED`,
+					`MODIFIED_BY`,
+					`BOX_SORT_NUMBER`,
+					`SAMPLE_TYPE_CODE`,
+					`STUDY_CODE`,
+					`DEIDENTIFIED_PATIENT_ID`,
+					`CITY`,
+					`STUDY_TYPE_ID`,
+                    `SAMPLE_TYPE`,
+                    `SERUM_VOLUME`,
+					`PLASMA_VOLUME`,
+					`WHOLE_BLOOD_VOLUME`,
+					`VTM_VOLUME`,
+					`CULTURE_VOLUME`,
+					`URINE_VOLUME`,
+					`STOOL_VOLUME`,
+					`CSF_VOLUME`,
+					`SPUTUM_VOLUME`,
+					`RESPIRATORY_SWAB_VOLUME`,
+					`SKIN_LESION_SWAB_VOLUME`,
+					`CERVICAL_SWAB_VOLUME`,
+					`INSECT_POOLS_VOLUME`,
+					`WASTE_WATER_VOLUME`,
+					`OTHER_VOLUME`,
+					`UNKNOWN_VOLUME`)
+			SELECT 
+					`AGE`,
+					`CLINIC_TYPE`,
+					NULL DISPOSITION_STATUS,
+					`COLLECTION_DATE`,
+					NULL PLASMA_BOX_NBR,
+					LEFT(`SEX`, 1),
+					`COLLECTION_SITE`,
+					NULL SORT_NUMBER,
+					`COMMENTS` SPECIMEN_COMMENT,
+					v_CountryCode SPECIMEN_COUNTRY,
+					`SPECIMEN_IDENTIFIER`,
+					NULL WHOLE_BLOOD_ALIQUOT,
+					NULL WHOLE_BLOOD_BOX_NBR,
+					v_PanelID PANEL_ID,
+					NULL DELETED,
+					COALESCE(`NO_OF_ALIQUOTS`, 0),
+					NULL SEQUENCE_COUNT,
+					NULL SEQUENCE_DISPLAY_TEXT,
+					NULL SPECIMEN_TEST_RUN_COUNT,
+					NULL SPECIMEN_TEST_RUN_DISPLAY_TEXT,
+					NULL FREEZER_ITEM_COUNT,
+					NULL FREEZER_ITEM_DISPLAY_TEXT,
+					NOW() CREATED,
+					NULL CREATED_BY,
+					NULL MODIFIED,
+					NULL MODIFIED_BY,
+					NULL BOX_SORT_NUMBER,
+					SAMPLE_TYPE SAMPLE_TYPE_CODE,
+					`STUDY` STUDY_CODE,
+					`DEIDENTIFIED_PATIENT_ID` DEIDENTIFIED_PATIENT_ID,
+					`CITY`,
+					st.`STUDY_ID`,
+					SAMPLE_TYPE_VALUE SAMPLE_TYPE,
+                    `SERUM_VOLUME`,
+					`PLASMA_VOLUME`,
+					`WHOLE_BLOOD_VOLUME`,
+					`VTM_VOLUME`,
+					`CULTURE_VOLUME`,
+					`URINE_VOLUME`,
+					`STOOL_VOLUME`,
+					`CSF_VOLUME`,
+					`SPUTUM_VOLUME`,
+					`RESPIRATORY_SWAB_VOLUME`,
+					`SKIN_LESION_SWAB_VOLUME`,
+					`CERVICAL_SWAB_VOLUME`,
+					`INSECT_POOLS_VOLUME`,
+					`WASTE_WATER_VOLUME`,
+					`OTHER_VOLUME`,
+					`UNKNOWN_VOLUME`
+				FROM
+					stage_specimen s
+						LEFT JOIN
+					study_type st ON s.STUDY = st.STUDY_NAME
+				WHERE
+					s.process_id = mPROCESS_ID;
+
+			-- FINAL UPDATE COUNTS	
+			SELECT COUNT(*) INTO v_SpecimenCount FROM specimen where PANEL_ID = v_PanelID;
+            
+            -- Update Specimen counts and display text
+			UPDATE panel p
+			JOIN specimen s ON s.panel_id = p.panel_id
+			SET 
+				p.SPECIMEN_COUNT = v_SpecimenCount,
+				p.SPECIMEN_DISPLAY_TEXT = CASE 
+					WHEN v_SpecimenCount > 1 THEN 'View' 
+					WHEN p.SPECIMEN_COUNT = 1 AND (p.DELETED IS NULL OR p.DELETED = 0) THEN s.SPECIMEN_IDENTIFIER
+					ELSE 'Add'
+				END
+			WHERE p.PANEL_ID = v_PanelID;
+            
+			SELECT 'Success' As MSG, v_SpecimenCount As RECORD_CNT, 
+				CONCAT('Panel Identifier: ', v_PanelIdentifier, '\n Panel ID#: ', v_PanelID) AS SUCCESS_MSG;
+			
+		END IF;
+END
+
+public FileResult InsertStageSpecimen(Guid guid, DataTable dataTable, SiteJSON site)
+{
+	var specimenList = ProcessStageSpecimens(guid, dataTable, site);
+	if (specimenList.Count > 0)
+	{
+		context.StageSpecimen.AddRange(specimenList);
+		context.SaveChanges();
+		return InsertSpecimen(guid);				
+	}
+	else
+	{
+		return new FileResult { Success = false, Message = $"No data provided in the sheet." };
+	}
+}
+
+public async Task<FileResult> ValidateSpecimenData(Guid guid)
+{
+    try
+    {
+        List<DataProcessResult> result = new List<DataProcessResult>();
+        DataTable dt = new DataTable();
+        DbConnection connection = context.Database.GetDbConnection();
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandTimeout = ConfigurationHelper.ConnectionTimeOut;
+            command.CommandText = "sharepoint_validate_specimen";
+            command.CommandType = CommandType.StoredProcedure;
+
+            MySqlParameter mprocess_id = new MySqlParameter
+            {
+                ParameterName = "mPROCESS_ID",
+                MySqlDbType = MySqlDbType.VarChar,
+                Direction = ParameterDirection.Input,
+                Value = guid.ToString()
+            };
+            command.Parameters.Add(mprocess_id);
+
+            context.Database.OpenConnection();
+            dt.Load(command.ExecuteReader());
+
+            context.Database.CloseConnection();
+        }
+
+        result = (from DataRow dr in dt.Rows
+                  select new DataProcessResult
+                  {
+                      Message = dr["MSG"].ToString(),
+                      RecordProcessed = Convert.ToInt32(dr["RECORD_CNT"]),
+                      SuccessMessage = dr["SUCCESS_MSG"].ToString()
+                  }).ToList();
+
+        if (result != null && result.Count > 0 && result.Select(s => s.Message).FirstOrDefault() == "Success")
+        {
+            return new FileResult
+            {
+                Success = true,
+                Message = result.FirstOrDefault().SuccessMessage
+            };
+        }
+        else
+        {
+            string errorMsgsString = string.Join(Environment.NewLine, result.Select(s => s.Message));
+            return new FileResult { Success = false, Message = errorMsgsString.Trim() };
+        }
+    }
+    catch (Exception ex)
+    {
+        return new FileResult { Success = false, Message = $"Validate specimen data failed: " + ex.Message };
+    }
+}
+
+
+private FileResult InsertSpecimen(Guid guid)
+{
+	try
+	{
+		List<DataProcessResult> result = new List<DataProcessResult>();
+		DataTable dt = new DataTable();
+		DbConnection connection = context.Database.GetDbConnection();
+		using (var command = connection.CreateCommand())
+		{
+			command.CommandTimeout = ConfigurationHelper.ConnectionTimeOut;
+			command.CommandText = "sharepoint_sync_specimen";
+			command.CommandType = CommandType.StoredProcedure;
+
+			MySqlParameter mprocess_id = new MySqlParameter
+			{
+				ParameterName = "mPROCESS_ID",
+				MySqlDbType = MySqlDbType.VarChar,
+				Direction = ParameterDirection.Input,
+				Value = guid.ToString()
+			};
+			command.Parameters.Add(mprocess_id);
+
+			context.Database.OpenConnection();
+			dt.Load(command.ExecuteReader());
+
+			context.Database.CloseConnection();
+		}
+
+		result = (from DataRow dr in dt.Rows
+				  select new DataProcessResult
+				  {
+					  Message = dr["MSG"].ToString(),
+					  RecordProcessed = Convert.ToInt32(dr["RECORD_CNT"]),
+					  SuccessMessage = dr["SUCCESS_MSG"].ToString()
+				  }).ToList();
+
+		if (result != null && result.Count > 0 && result.Select(s => s.Message).FirstOrDefault() == "Success")
+		{
+			return new FileResult
+			{
+				Success = true,
+				Message = result.FirstOrDefault().SuccessMessage
+			};
+		}
+		else
+		{
+			string errorMsgsString = string.Join(Environment.NewLine, result.Select(s => s.Message));
+			return new FileResult { Success = false, Message = errorMsgsString.Trim() };
+		}
+	}
+	catch (Exception ex)
+	{
+		return new FileResult { Success = false, Message = $"Specimen table insert failed with following reason: " + ex.Message };
+	}
+}
