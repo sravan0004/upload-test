@@ -1,3 +1,130 @@
+
+using System.Data;
+using System.Data.Common;
+using Microsoft.EntityFrameworkCore;
+
+public class SpecimenProcessor
+{
+    private readonly YourDbContext _db;
+
+    public SpecimenProcessor(YourDbContext db)
+    {
+        _db = db;
+    }
+
+    private async Task ExecuteSpAsync(string spName, string processId, DbConnection conn)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = spName;
+        cmd.CommandType = CommandType.StoredProcedure;
+
+        var p = cmd.CreateParameter();
+        p.ParameterName = "mPROCESS_ID";
+        p.Value = processId;
+        cmd.Parameters.Add(p);
+
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    private async Task<int> GetErrorCountAsync(string processId, DbConnection conn)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText =
+            "SELECT COUNT(*) FROM stage_specimen WHERE ERROR_MSG IS NOT NULL AND PROCESS_ID = @p";
+        cmd.CommandType = CommandType.Text;
+
+        var p = cmd.CreateParameter();
+        p.ParameterName = "@p";
+        p.Value = processId;
+        cmd.Parameters.Add(p);
+
+        var result = await cmd.ExecuteScalarAsync();
+        return Convert.ToInt32(result);
+    }
+
+    private async Task<List<FileResult>> LoadErrorsAsync(string processId, DbConnection conn)
+    {
+        var results = new List<FileResult>();
+
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText =
+            @"SELECT CONCAT('Row# ', row_no, ' ', TRIM(ERROR_MSG)) AS MSG
+              FROM stage_specimen
+              WHERE ERROR_MSG IS NOT NULL AND PROCESS_ID = @p";
+
+        var p = cmd.CreateParameter();
+        p.ParameterName = "@p";
+        p.Value = processId;
+        cmd.Parameters.Add(p);
+
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            results.Add(new FileResult
+            {
+                Message = reader.GetString("MSG"),
+                Success = false
+            });
+        }
+
+        return results;
+    }
+
+    // MAIN METHOD
+    public async Task<List<FileResult>> ProcessSpecimenAsync(string processId)
+    {
+        var conn = _db.Database.GetDbConnection();
+        if (conn.State != ConnectionState.Open)
+            await conn.OpenAsync();
+
+        // RUN SPs SEQUENTIALLY
+        await ExecuteSpAsync("sp_specimen_validate_studytype", processId, conn);
+        await ExecuteSpAsync("sp_specimen_validate_volumes", processId, conn);
+        await ExecuteSpAsync("sp_specimen_validate_duplicates", processId, conn);
+        await ExecuteSpAsync("sp_specimen_validate_misc", processId, conn);
+
+        // CHECK ERROR COUNT
+        int errorCount = await GetErrorCountAsync(processId, conn);
+
+        if (errorCount > 0)
+        {
+            // RETURN VALIDATION ERRORS
+            return await LoadErrorsAsync(processId, conn);
+        }
+
+        // NO ERRORS → RUN INSERT
+        var results = new List<FileResult>();
+
+        await using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = "sp_specimen_insert_records";
+            cmd.CommandType = CommandType.StoredProcedure;
+
+            var p = cmd.CreateParameter();
+            p.ParameterName = "mPROCESS_ID";
+            p.Value = processId;
+            cmd.Parameters.Add(p);
+
+            await using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                results.Add(new FileResult
+                {
+                    Message = reader["MSG"]?.ToString() ?? "",
+                    Success = reader["SUCCESS_MSG"] != DBNull.Value
+                });
+            }
+        }
+
+        return results;
+    }
+}
+
+
+
+
+
+-------------------------------------------------------
 using System.Data;
 using System.Data.Common;
 using Microsoft.EntityFrameworkCore;
