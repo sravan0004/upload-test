@@ -1,34 +1,423 @@
-
+using APDC.BulkDataSync.Data;
+using APDC.BulkDataSync.Data.Entity;
+using APDC.BulkDataSync.Data.Repository;
+using APDC.BulkDataSync.Helper;
+using APDC.BulkDataSync.Helpers;
+using APDC.BulkDataSync.Model;
+using System;
 using System.Data;
-using System.Data.Common;
-using Microsoft.EntityFrameworkCore;
 
-public class SpecimenProcessor
+namespace APDC.BulkDataSync
 {
-    private readonly YourDbContext _db;
-
-    public SpecimenProcessor(YourDbContext db)
+    internal class SyncSpecimen
     {
-        _db = db;
+        internal void Sync(List<SiteJSON> siteList)
+        {
+
+            Dictionary<string, Exception> errorMessage = new Dictionary<string, Exception>();
+
+            foreach (var site in siteList)
+            {
+                try
+                {
+                    new FileHelper().CreateRootFolder(site, Constants.SampleType.Specimen);
+
+                    var sourceDir = string.Format(site.DownloadFolderPath, Constants.SampleType.Specimen);
+                    var inputSubFolders = Directory.GetDirectories(sourceDir);
+
+                    if (inputSubFolders != null && inputSubFolders.Count() > 0)
+                    {
+                        foreach (var inputSubFolder in inputSubFolders)
+                        {
+                            DirectoryInfo info = new DirectoryInfo(inputSubFolder);
+                            var lastModified = info.LastWriteTimeUtc;
+                            if (lastModified.AddMinutes(ConfigurationHelper.DownloadInterval) < DateTime.UtcNow)
+                            {
+                                Guid guid = Guid.NewGuid();
+                                var destDir = string.Format(site.ProcessingFolderPath, Constants.SampleType.Specimen);
+
+                                Directory.Move(Path.Combine(sourceDir, inputSubFolder), Path.Combine(destDir, guid.ToString()));
+
+                                // move folders to working/processing folder to avoid multiple hits on the same file
+                                //new FileHelper().MoveAndMergeDirectories(Path.Combine(sourceDir, inputSubFolder), Path.Combine(destDir, guid.ToString()));
+                                var tempDirPath = $"{Path.Combine(destDir, guid.ToString())}\\";
+
+                                var subFolders = Directory.GetDirectories(destDir);
+
+                                if (subFolders.Count() > 0)
+                                {
+                                    foreach (var subFolder in subFolders)
+                                    {
+                                        var files = Directory.GetFiles(subFolder);
+                                        string subFolderName = Path.GetFileName(subFolder);
+
+                                        var inValidFiles = files.Where(f => !f.EndsWith(Constants.OnlyXLSXFileType)).ToList();
+                                        if (inValidFiles.Count > 0)
+                                        {
+                                            foreach (var invalidFile in inValidFiles)
+                                            {
+                                                guid = Guid.NewGuid();
+
+                                                LogHelper.WriteErrorMessage(tempDirPath, guid + "_Error", string.Format("{0} {1} {2}",
+                                                    string.Join(Constants.SampleType.Specimen, Environment.NewLine), "Invalid File(s) uploaded", string.Join(subFolderName, Environment.NewLine)));
+
+                                                string finalErrorFolder = string.Format($"{0}{1}_{2}", string.Format(site.StageOutputFolderPath, Constants.SampleType.Specimen),
+                                                    guid.ToString(), subFolderName);
+
+                                                Directory.Move(tempDirPath, finalErrorFolder);
+
+                                                string invalidFileName = Path.GetFileName(invalidFile);
+                                                InsertDataSyncFileDetails(site, invalidFileName, null, "Error - Invalid file uploaded", "Error");
+                                                errorMessage.Add($"Invalid File Type - {invalidFileName}", new Exception($"Invalid File(s) uploaded for {Constants.SampleType.Specimen} - {site.Location} - FileName: {invalidFileName}"));
+
+                                                CleanUpFolder(subFolder);
+                                            }
+                                            break;
+                                        }
+
+                                        files = files.Where(f => f.EndsWith(Constants.OnlyXLSXFileType)).ToArray();
+
+
+                                        foreach (var file in files)
+                                        {
+                                            var context = new IDDAContext();
+
+                                            var fileName = Path.GetFileName(file);
+                                            var inputFolderName = Path.GetFileName(inputSubFolder);
+
+                                            guid = Guid.NewGuid();
+                                            var dataTable = new CSVHelper().ReadFile(file, Constants.SampleType.Specimen);
+                                            // continue;
+                                            if (dataTable == null || dataTable.Rows.Count == 0)
+                                            {
+                                                LogHelper.WriteErrorMessage(tempDirPath, guid + "_Error", string.Format("{0} {1} {2}",
+                                                    string.Join(Constants.SampleType.Specimen, Environment.NewLine), "Error reading file, invalid file uploaded.", string.Join(Environment.NewLine, subFolderName)));
+                                                //InsertDataSyncFileDetails(site, fileName, null, "Error - Invalid file uploaded", "Error");
+
+                                                string finalOutputFolder = string.Format("{0}{1}_{2}_{3}", string.Format(site.StageOutputFolderPath, Constants.SampleType.Specimen),
+                                                    guid.ToString(), subFolderName, inputFolderName);
+                                                Directory.Move(tempDirPath, finalOutputFolder);
+                                                break;
+                                            }
+
+                                            var fileResult = new FileResult();
+                                            try
+                                            {
+                                                //fileResult = new StageSpecimenRepository(context).InsertStageSpecimen(guid, dataTable, site);
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                LogHelper.WriteErrorMessage(tempDirPath, guid + "_Error", string.Format("{0} {1} {2}",
+                                                    string.Join(Constants.SampleType.Specimen, Environment.NewLine), "Error in inserting the records.", string.Join(Environment.NewLine, subFolderName)));
+                                            }
+
+                                            if (fileResult.Success)
+                                            {
+                                                var successMsg = string.Format("{0} {1}", $"Specimen Data from {fileName} was uploaded to {Environment.NewLine}", fileResult.Message);
+
+                                                LogHelper.WriteErrorMessage(tempDirPath, guid + "_Success", successMsg);
+                                                var fileId = InsertDataSyncFileDetails(site, fileName, dataTable.Rows.Count, successMsg, "Success");
+
+                                                fileResult = new StageSpecimenRepository(context).UpdateStageSpecimen(guid, fileId);
+
+                                                LogHelper.WriteLog(String.Format("{0}{1}", site.LogFolderPath, site.ProcessLogFileName), string.Format("{0} {1}", Constants.SampleType.Specimen, Constants.SuccessfullySynced));
+
+                                                File.Delete(file);
+                                            }
+                                            else
+                                            {
+                                                LogHelper.WriteErrorMessage(tempDirPath, guid + "_Error", string.Format("{0} {1} {2}",
+                                                    string.Join(Constants.SampleType.Specimen, Environment.NewLine), fileResult.Message, string.Join(Environment.NewLine, subFolderName)));
+                                                var fileId = InsertDataSyncFileDetails(site, fileName, null, fileResult.Message, "Error");
+
+                                                fileResult = new StageSpecimenRepository(context).UpdateStageSpecimen(guid, fileId);
+
+                                                LogHelper.WriteLog(String.Format("{0}{1}", site.LogFolderPath, site.ProcessLogFileName), string.Format("{0} {1}", Constants.SampleType.Specimen, Constants.FailedSync));
+                                            }
+
+                                            string finalFolder = string.Format("{0}{1}_{2}_{3}", string.Format(site.StageOutputFolderPath, Constants.SampleType.Specimen),
+                                                guid.ToString(), subFolderName, inputFolderName);
+
+                                            Directory.Move(tempDirPath, finalFolder);
+                                        }
+
+                                        CleanUpFolder(subFolder);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    errorMessage.Add(string.Format("{0} - {1} - {2}", site.SiteName, site.Location, Constants.SampleType.Specimen), ex);
+                    LogHelper.WriteErrorLog(String.Format("{0}{1}", site.LogFolderPath, site.ProcessErrorFileName), ex.StackTrace);
+                    CleanupFolders(site);
+                }
+
+            }
+
+            if (errorMessage.Count > 0)
+            {
+                new EmailHelper().CreateExceptionEmail(errorMessage, Constants.Specimen);
+            }
+        }
+
+        private static void CleanUpFolder(string folderName)
+        {
+            if (Directory.Exists(folderName))
+                Directory.Delete(folderName, true);
+        }
+
+        private static void CleanupFolders(SiteJSON site)
+        {
+            // this is not needed as we already moved the sourceDir initially
+            //var sourceDir = string.Format(site.DownloadFolderPath, Constants.SampleType.Specimen);
+            //var inputSubFolders = Directory.GetDirectories(sourceDir);
+            //foreach (var inputSubFolder in inputSubFolders)
+            //{
+            //    if (Directory.Exists(inputSubFolder))
+            //        Directory.Delete(inputSubFolder, true);
+            //}
+
+
+            var processingDir = string.Format(site.ProcessingFolderPath, Constants.SampleType.Specimen);
+            Directory.Move(Path.Combine(processingDir), Path.Combine(string.Format(site.StageOutputFolderPath, Constants.SampleType.Specimen)));
+
+        }
+
+        private static int? InsertDataSyncFileDetails(SiteJSON site, string fileName, int? count, string comments, string resultMsg)
+        {
+            comments = comments.Substring(0, Math.Min(comments.Length, 1997));
+            var context = new IDDAContext();
+            var dataSyncFile = new StageDatSyncFile()
+            {
+                FileTypeID = Constants.FileTypes.Specimen,
+                SiteName = site.SiteName,
+                Count = count,
+                Comments = comments,
+                FileName = fileName,
+                Location = site.Location,
+                Status = resultMsg,
+                Created = DateTime.Now,
+                CreatedBy = null,
+            };
+            return new DataSyncFileRepository(context).InsertDataSyncFileDetails(dataSyncFile);
+        }
+    }
+}
+internal class StageSpecimenRepository
+{
+    private IDDAContext context;
+
+    public StageSpecimenRepository(IDDAContext context)
+    {
+        this.context = context;
     }
 
-    private async Task ExecuteSpAsync(string spName, string processId, DbConnection conn)
+    private List<StageSpecimen> ProcessStageSpecimens(Guid guid, DataTable dataTable, SiteJSON site)
     {
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = spName;
-        cmd.CommandType = CommandType.StoredProcedure;
+        List<StageSpecimen> specimenList = new List<StageSpecimen>();
+        try
+        {
+            int index = 0;
+            foreach (DataRow row in dataTable.Rows)
+            {
+                index = index + 1;
+                string rowSex = Convert.ToString(row["Sex"]);
+                string rowStudy = Convert.ToString(row["Study"]);
+                string rowDeidentifiedPatientID = Convert.ToString(row["DeidentifiedPatientID"]);
+                string rowSpecimenID = Convert.ToString(row["SpecimenIdentifier"]);
+                string rowNoOfAliquots = Convert.ToString(row["NoOfAliquots"]);
+                string rowCity = Convert.ToString(row["City"]);
+                string rowCollectionSite = Convert.ToString(row["CollectionSite"]);
+                string rowClinicType = Convert.ToString(row["ClinicType"]);
+                string rowDrawDate = Convert.ToString(row["CollectionDate(YYYY-MM-DD)"]);
+                string rowComments = Convert.ToString(row["Comments"]);
+                string rowAge = Convert.ToString(row["Age"]);
+                string rowSerumVolume = Convert.ToString(row["Serum_Volume"]);
+                string rowPlasmaVolume = Convert.ToString(row["Plasma_Volume"]);
+                string rowWholeBloodVolume = Convert.ToString(row["Whole_Blood_Volume"]);
+                string rowVtmVolume = Convert.ToString(row["VTM_Volume"]);
+                string rowCultureVolume = Convert.ToString(row["Culture_Volume"]);
+                string rowUrineVolume = Convert.ToString(row["Urine_Volume"]);
+                string rowStoolVolume = Convert.ToString(row["Stool_Volume"]);
+                string rowCsfVolume = Convert.ToString(row["CSF_Volume"]);
+                string rowSputumVolume = Convert.ToString(row["Sputum_Volume"]);
+                string rowRespiratorySwabVolume = Convert.ToString(row["Respiratory_Swab_Volume"]);
+                string rowSkinLesionSwabVolume = Convert.ToString(row["Skin_Lesion_Swab_Volume"]);
+                string rowCervicalSwabVolume = Convert.ToString(row["Cervical_Swab_Volume"]);
+                string rowInsectPoolsVolume = Convert.ToString(row["Insect_Pools_Volume"]);
+                string rowWasteWaterVolume = Convert.ToString(row["Waste_Water_Volume"]);
+                string rowOtherVolume = Convert.ToString(row["Other_Volume"]);
+                string rowUnknownVolume = Convert.ToString(row["Unknown_Volume"]);
 
-        var p = cmd.CreateParameter();
-        p.ParameterName = "mPROCESS_ID";
-        p.Value = processId;
-        cmd.Parameters.Add(p);
+                var specimen = new StageSpecimen
+                {
+                    Sex = string.IsNullOrEmpty(rowSex) ? null : rowSex.RemoveNullandSpace(),
+                    Study = string.IsNullOrEmpty(rowStudy) ? null : rowStudy,
+                    DeidentifiedPatientID = string.IsNullOrEmpty(rowDeidentifiedPatientID) ? null : rowDeidentifiedPatientID.RemoveNullandSpace(),
+                    SpecimenIdentifier = string.IsNullOrEmpty(rowSpecimenID) ? string.Empty : rowSpecimenID.RemoveNullandSpace(),
+                    NumberOfAliquot = string.IsNullOrEmpty(rowNoOfAliquots) ? null : rowNoOfAliquots.RemoveNullandSpace(),
+                    City = string.IsNullOrEmpty(rowCity) ? null : rowCity.RemoveNullandSpace(),
+                    CollectionSite = string.IsNullOrEmpty(rowCollectionSite) ? null : rowCollectionSite.RemoveNullandSpace(),
+                    ClinicType = string.IsNullOrEmpty(rowClinicType) ? null : rowClinicType.RemoveNullandSpace(),
+                    CollectionDate = DateTime.TryParse(rowDrawDate, out var drawDate) ? (DateTime?)drawDate : null,
+                    Comments = string.IsNullOrEmpty(rowComments) ? null : rowComments.RemoveNullandSpace(),
+                    Age = string.IsNullOrEmpty(rowAge) ? null : StringExtension.TruncateString(rowAge), // remove any additional numbers after 2 decimal points
+                    ProcessId = guid.ToString(),
+                    Created = DateTime.Now,
+                    SiteCountryCode = site.CountryCode,
+                    SiteShortCode = site.ShortCode,
+                    SiteName = site.SiteName,
+                    RowNumber = index,
+                    SerumVolume = string.IsNullOrEmpty(rowSerumVolume) ? null : StringExtension.TruncateString(rowSerumVolume),
+                    PlasmaVolume = string.IsNullOrEmpty(rowPlasmaVolume) ? null : StringExtension.TruncateString(rowPlasmaVolume),
+                    WholeBloodVolume = string.IsNullOrEmpty(rowWholeBloodVolume) ? null : StringExtension.TruncateString(rowWholeBloodVolume),
+                    VtmVolume = string.IsNullOrEmpty(rowVtmVolume) ? null : StringExtension.TruncateString(rowVtmVolume),
+                    CultureVolume = string.IsNullOrEmpty(rowCultureVolume) ? null : StringExtension.TruncateString(rowCultureVolume),
+                    UrineVolume = string.IsNullOrEmpty(rowUrineVolume) ? null : StringExtension.TruncateString(rowUrineVolume),
+                    StoolVolume = string.IsNullOrEmpty(rowStoolVolume) ? null : StringExtension.TruncateString(rowStoolVolume),
+                    CsfVolume = string.IsNullOrEmpty(rowCsfVolume) ? null : StringExtension.TruncateString(rowCsfVolume),
+                    SputumVolume = string.IsNullOrEmpty(rowSputumVolume) ? null : StringExtension.TruncateString(rowSputumVolume),
+                    RespiratorySwabVolume = string.IsNullOrEmpty(rowRespiratorySwabVolume) ? null : StringExtension.TruncateString(rowRespiratorySwabVolume),
+                    SkinLesionSwabVolume = string.IsNullOrEmpty(rowSkinLesionSwabVolume) ? null : StringExtension.TruncateString(rowSkinLesionSwabVolume),
+                    CervicalSwabVolume = string.IsNullOrEmpty(rowCervicalSwabVolume) ? null : StringExtension.TruncateString(rowCervicalSwabVolume),
+                    InsectPoolsVolume = string.IsNullOrEmpty(rowInsectPoolsVolume) ? null : StringExtension.TruncateString(rowInsectPoolsVolume),
+                    WasteWaterVolume = string.IsNullOrEmpty(rowWasteWaterVolume) ? null : StringExtension.TruncateString(rowWasteWaterVolume),
+                    OtherVolume = string.IsNullOrEmpty(rowOtherVolume) ? null : StringExtension.TruncateString(rowOtherVolume),
+                    UnknownVolume = string.IsNullOrEmpty(rowUnknownVolume) ? null : StringExtension.TruncateString(rowUnknownVolume),
+                };
 
-        await cmd.ExecuteNonQueryAsync();
+                specimenList.Add(specimen);
+
+            }
+        }
+        catch (Exception ex)
+        {
+            return specimenList;
+        }
+
+        return specimenList;
     }
 
-    private async Task<int> GetErrorCountAsync(string processId, DbConnection conn)
+    public FileResult InsertStageSpecimen(Guid guid, DataTable dataTable, SiteJSON site)
     {
-        await using var cmd = conn.CreateCommand();
+        var specimenList = ProcessStageSpecimens(guid, dataTable, site);
+        if (specimenList.Count > 0)
+        {
+            context.StageSpecimen.AddRange(specimenList);
+            context.SaveChanges();
+            return ProcessSpecimen(guid.ToString());
+        }
+        else
+        {
+            return new FileResult { Success = false, Message = $"No data provided in the sheet." };
+        }
+    }
+
+    public FileResult ProcessSpecimen(string processId)
+    {
+        var conn = context.Database.GetDbConnection();
+        if (conn.State != ConnectionState.Open)
+            conn.OpenAsync();
+
+        ExecuteSpAsync("sp_specimen_validate_studytype", processId, conn, 1);
+        ExecuteSpAsync("sp_specimen_validate_volumes", processId, conn, 2);
+        ExecuteSpAsync("sp_specimen_validate_duplicates", processId, conn, 3);
+        ExecuteSpAsync("sp_specimen_validate_misc", processId, conn, 4);
+
+        // CHECK ERROR COUNT
+        int errorCount = GetErrorCountAsync(processId, conn);
+
+        if (errorCount > 0)
+        {
+            // RETURN VALIDATION ERRORS
+            return LoadErrors(processId, conn);
+        }
+
+        var result = new FileResult();
+        List<DataProcessResult> dtResults = new List<DataProcessResult>();
+        DataTable dt = new DataTable();
+        DbConnection connection = context.Database.GetDbConnection();
+
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = "sp_specimen_insert_records";
+            cmd.CommandType = CommandType.StoredProcedure;
+
+            var p = cmd.CreateParameter();
+            p.ParameterName = "mPROCESS_ID";
+            p.Value = processId;
+            cmd.Parameters.Add(p);
+
+            dt.Load(cmd.ExecuteReader());
+        }
+
+        dtResults = (from DataRow dr in dt.Rows
+                     select new DataProcessResult
+                     {
+                         Message = dr["MSG"].ToString(),
+                         RecordProcessed = Convert.ToInt32(dr["RECORD_CNT"]),
+                         SuccessMessage = dr["SUCCESS_MSG"].ToString()
+                     }).ToList();
+
+        if (dtResults != null && dtResults.Count > 0 && dtResults.Select(s => s.Message).FirstOrDefault() == "Success")
+        {
+            return new FileResult
+            {
+                Success = true,
+                Message = dtResults.FirstOrDefault().SuccessMessage
+            };
+        }
+        else
+        {
+            string errorMsgsString = string.Join(Environment.NewLine, dtResults.Select(s => s.Message));
+            return new FileResult { Success = false, Message = errorMsgsString.Trim() };
+        }
+    }
+
+    public FileResult UpdateStageSpecimen(Guid guid, int? fileId)
+    {
+        var specimenList = context.StageSpecimen.Where(x => x.ProcessId == guid.ToString()).ToList();
+        specimenList.ForEach(x => x.FileID = fileId);
+        if (specimenList.Count > 0)
+        {
+            context.StageSpecimen.UpdateRange(specimenList);
+            context.SaveChanges();
+
+            return new FileResult { Success = true, Message = $"Stage table update completed" };
+        }
+        else
+        {
+            return new FileResult { Success = false, Message = $"Stage table update failed" };
+        }
+    }
+
+    private void ExecuteSpAsync(string spName, string processId, DbConnection conn, int stepNo)
+    {
+        try
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = spName;
+            cmd.CommandType = CommandType.StoredProcedure;
+
+            var p = cmd.CreateParameter();
+            p.ParameterName = "mPROCESS_ID";
+            p.Value = processId;
+            cmd.Parameters.Add(p);
+
+            cmd.ExecuteNonQuery();
+        }
+        catch (Exception)
+        {
+            throw new Exception($"Unable to process the Specimens, process stopped at Step# {stepNo}");
+        }
+    }
+
+    private int GetErrorCountAsync(string processId, DbConnection conn)
+    {
+        using var cmd = conn.CreateCommand();
         cmd.CommandText =
             "SELECT COUNT(*) FROM stage_specimen WHERE ERROR_MSG IS NOT NULL AND PROCESS_ID = @p";
         cmd.CommandType = CommandType.Text;
@@ -38,230 +427,34 @@ public class SpecimenProcessor
         p.Value = processId;
         cmd.Parameters.Add(p);
 
-        var result = await cmd.ExecuteScalarAsync();
+        var result = cmd.ExecuteScalar();
         return Convert.ToInt32(result);
     }
 
-    private async Task<List<FileResult>> LoadErrorsAsync(string processId, DbConnection conn)
+    private FileResult LoadErrors(string processId, DbConnection conn)
     {
-        var results = new List<FileResult>();
+        var result = new FileResult();
 
-        await using var cmd = conn.CreateCommand();
+        using var cmd = conn.CreateCommand();
         cmd.CommandText =
             @"SELECT CONCAT('Row# ', row_no, ' ', TRIM(ERROR_MSG)) AS MSG
-              FROM stage_specimen
-              WHERE ERROR_MSG IS NOT NULL AND PROCESS_ID = @p";
+          FROM stage_specimen
+          WHERE ERROR_MSG IS NOT NULL AND PROCESS_ID = @p";
 
         var p = cmd.CreateParameter();
         p.ParameterName = "@p";
         p.Value = processId;
         cmd.Parameters.Add(p);
 
-        await using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
         {
-            results.Add(new FileResult
+            result = new FileResult
             {
                 Message = reader.GetString("MSG"),
                 Success = false
-            });
-        }
-
-        return results;
-    }
-
-    // MAIN METHOD
-    public async Task<List<FileResult>> ProcessSpecimenAsync(string processId)
-    {
-        var conn = _db.Database.GetDbConnection();
-        if (conn.State != ConnectionState.Open)
-            await conn.OpenAsync();
-
-        // RUN SPs SEQUENTIALLY
-        await ExecuteSpAsync("sp_specimen_validate_studytype", processId, conn);
-        await ExecuteSpAsync("sp_specimen_validate_volumes", processId, conn);
-        await ExecuteSpAsync("sp_specimen_validate_duplicates", processId, conn);
-        await ExecuteSpAsync("sp_specimen_validate_misc", processId, conn);
-
-        // CHECK ERROR COUNT
-        int errorCount = await GetErrorCountAsync(processId, conn);
-
-        if (errorCount > 0)
-        {
-            // RETURN VALIDATION ERRORS
-            return await LoadErrorsAsync(processId, conn);
-        }
-
-        // NO ERRORS → RUN INSERT
-        var results = new List<FileResult>();
-
-        await using (var cmd = conn.CreateCommand())
-        {
-            cmd.CommandText = "sp_specimen_insert_records";
-            cmd.CommandType = CommandType.StoredProcedure;
-
-            var p = cmd.CreateParameter();
-            p.ParameterName = "mPROCESS_ID";
-            p.Value = processId;
-            cmd.Parameters.Add(p);
-
-            await using var reader = await cmd.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
-            {
-                results.Add(new FileResult
-                {
-                    Message = reader["MSG"]?.ToString() ?? "",
-                    Success = reader["SUCCESS_MSG"] != DBNull.Value
-                });
-            }
-        }
-
-        return results;
-    }
-}
-
-
-
-
-
--------------------------------------------------------
-using System.Data;
-using System.Data.Common;
-using Microsoft.EntityFrameworkCore;
-
-public class SpecimenProcessor
-{
-    private readonly YourDbContext _db;
-
-    public SpecimenProcessor(YourDbContext db)
-    {
-        _db = db;
-    }
-
-    // ------------------------------
-    // Helper: execute stored procedure (no result set)
-    // ------------------------------
-    private async Task ExecuteSpAsync(string spName, string processId, DbConnection conn)
-    {
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = spName;
-        cmd.CommandType = CommandType.StoredProcedure;
-
-        var p = cmd.CreateParameter();
-        p.ParameterName = "mPROCESS_ID";
-        p.Value = processId;
-        cmd.Parameters.Add(p);
-
-        await cmd.ExecuteNonQueryAsync();
-    }
-
-    // ------------------------------
-    // Helper: execute scalar
-    // ------------------------------
-    private async Task<object?> ExecuteScalarAsync(string sql, string processId, DbConnection conn)
-    {
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = sql;
-        cmd.CommandType = CommandType.Text;
-
-        var p = cmd.CreateParameter();
-        p.ParameterName = "@p";
-        p.Value = processId;
-        cmd.Parameters.Add(p);
-
-        return await cmd.ExecuteScalarAsync();
-    }
-
-    // ------------------------------
-    // Helper: execute reader & return list of error messages
-    // ------------------------------
-    private async Task<List<string>> LoadErrorsAsync(string processId, DbConnection conn)
-    {
-        var output = new List<string>();
-
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText =
-            @"SELECT CONCAT('Row# ', row_no, ' ', TRIM(ERROR_MSG)) AS MSG
-              FROM stage_specimen
-              WHERE ERROR_MSG IS NOT NULL AND PROCESS_ID = @p";
-        cmd.CommandType = CommandType.Text;
-
-        var p = cmd.CreateParameter();
-        p.ParameterName = "@p";
-        p.Value = processId;
-        cmd.Parameters.Add(p);
-
-        await using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
-            output.Add(reader.GetString(0));
-
-        return output;
-    }
-
-    // ------------------------------
-    // Public Method: Validate + Insert
-    // ------------------------------
-    public async Task<object> ProcessSpecimenAsync(string processId)
-    {
-        var conn = _db.Database.GetDbConnection();
-
-        if (conn.State != ConnectionState.Open)
-            await conn.OpenAsync();
-
-        // Run SP1–SP4 in parallel
-        var t1 = ExecuteSpAsync("sp_specimen_validate_studytype", processId, conn);
-        var t2 = ExecuteSpAsync("sp_specimen_validate_volumes", processId, conn);
-        var t3 = ExecuteSpAsync("sp_specimen_validate_duplicates", processId, conn);
-        var t4 = ExecuteSpAsync("sp_specimen_validate_misc", processId, conn);
-
-        await Task.WhenAll(t1, t2, t3, t4);
-
-        // Check total error count
-        var errorCountObj = await ExecuteScalarAsync(
-            "SELECT COUNT(*) FROM stage_specimen WHERE ERROR_MSG IS NOT NULL AND PROCESS_ID = @p",
-            processId,
-            conn);
-
-        int errorCount = Convert.ToInt32(errorCountObj);
-
-        // If validation failed → return errors
-        if (errorCount > 0)
-        {
-            var errors = await LoadErrorsAsync(processId, conn);
-
-            return new
-            {
-                RECORD_CNT = 0,
-                SUCCESS_MSG = (string?)null,
-                ERRORS = errors
             };
         }
 
-        // Validation passed → call SP5 (insert)
-        var finalResult = new List<object>();
-
-        await using (var cmd = conn.CreateCommand())
-        {
-            cmd.CommandText = "sp_specimen_insert_records";
-            cmd.CommandType = CommandType.StoredProcedure;
-
-            var p = cmd.CreateParameter();
-            p.ParameterName = "mPROCESS_ID";
-            p.Value = processId;
-            cmd.Parameters.Add(p);
-
-            await using var reader = await cmd.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
-            {
-                finalResult.Add(new
-                {
-                    MSG = reader["MSG"]?.ToString(),
-                    RECORD_CNT = reader["RECORD_CNT"],
-                    SUCCESS_MSG = reader["SUCCESS_MSG"]
-                });
-            }
-        }
-
-        return finalResult;
+        return result;
     }
-}
