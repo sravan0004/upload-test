@@ -1,0 +1,602 @@
+using APDC.BulkDataSync.Data;
+using APDC.BulkDataSync.Data.Entity;
+using APDC.BulkDataSync.Data.Repository;
+using APDC.BulkDataSync.Helper;
+using APDC.BulkDataSync.Helpers;
+using APDC.BulkDataSync.Model;
+using System;
+using System.Data;
+
+namespace APDC.BulkDataSync
+{
+    internal class SyncSpecimen
+    {
+        internal void Sync(List<SiteJSON> siteList)
+        {
+            Dictionary<string, Exception> errorBag = new();
+
+            foreach (var site in siteList)
+            {
+                try
+                {
+                    ProcessSite(site, errorBag);
+                }
+                catch (Exception ex)
+                {
+                    var key = $"{site.SiteName} - {site.Location} - {Constants.SampleType.Specimen}";
+                    errorBag[key] = ex;
+
+                    LogHelper.WriteErrorLog(site.LogFolderPath + site.ProcessErrorFileName, ex.ToString());
+                    CleanupFolders(site); // Not needed but kept
+                }
+            }
+
+            if (errorBag.Count > 0)
+                new EmailHelper().CreateExceptionEmail(errorBag, Constants.Specimen);
+        }
+
+        // ============================================================
+        // MAIN SITE PROCESSOR
+        // ============================================================
+        private void ProcessSite(SiteJSON site, Dictionary<string, Exception> errorBag)
+        {
+            new FileHelper().CreateRootFolder(site, Constants.SampleType.Specimen);
+
+            string sourceDir = string.Format(site.DownloadFolderPath, Constants.SampleType.Specimen);
+            var subFolders = Directory.GetDirectories(sourceDir);
+
+            if (subFolders.Length == 0)
+                return;
+
+            foreach (var sub in subFolders)
+            {
+                DirectoryInfo info = new(sub);
+                if (!IsFolderReady(info))
+                    continue;
+
+                var guid = Guid.NewGuid();
+                var processingFolder = MoveToProcessingFolder(site, sub, guid);
+
+                ProcessSpecimenFolder(site, processingFolder, guid, errorBag);
+            }
+        }
+
+        private bool IsFolderReady(DirectoryInfo info)
+        {
+            return info.LastWriteTimeUtc.AddMinutes(ConfigurationHelper.DownloadInterval) < DateTime.UtcNow;
+        }
+
+        private string MoveToProcessingFolder(SiteJSON site, string sourceFolder, Guid guid)
+        {
+            string processingPath = string.Format(site.ProcessingFolderPath, Constants.SampleType.Specimen);
+            string target = Path.Combine(processingPath, guid.ToString());
+
+            Directory.Move(sourceFolder, target);
+            return target;
+        }
+
+        private void ProcessSpecimenFolder(SiteJSON site, string processRoot, Guid guid, Dictionary<string, Exception> errorBag)
+        {
+            var childFolders = Directory.GetDirectories(processRoot);
+            if (childFolders.Length == 0)
+                return;
+
+            foreach (var folder in childFolders)
+            {
+                ProcessFilesInFolder(site, folder, processRoot, guid, errorBag);
+                CleanUpFolder(folder);
+            }
+        }
+
+        private void ProcessFilesInFolder(
+            SiteJSON site,
+            string folder,
+            string tempDirPath,
+            Guid guid,
+            Dictionary<string, Exception> errorBag)
+        {
+            var files = Directory.GetFiles(folder).ToList();
+            string subFolderName = Path.GetFileName(folder);
+
+            if (HasInvalidFiles(files))
+            {
+                HandleInvalidFiles(files, site, subFolderName, tempDirPath, errorBag);
+                return;
+            }
+
+            var validFiles = files.Where(f => f.EndsWith(Constants.OnlyXLSXFileType)).ToList();
+
+            foreach (var file in validFiles)
+                ProcessSingleFile(site, file, tempDirPath, subFolderName, errorBag);
+        }
+
+        private bool HasInvalidFiles(List<string> files) =>
+            files.Any(f => !f.EndsWith(Constants.OnlyXLSXFileType));
+
+        private void HandleInvalidFiles(
+            List<string> invalidFiles,
+            SiteJSON site,
+            string subFolderName,
+            string tempDirPath,
+            Dictionary<string, Exception> errorBag)
+        {
+            foreach (var file in invalidFiles)
+            {
+                var id = Guid.NewGuid();
+
+                LogHelper.WriteErrorMessage(
+                    tempDirPath,
+                    id + "_Error",
+                    $"{Constants.SampleType.Specimen}{Environment.NewLine} Invalid File(s) uploaded {Environment.NewLine}{subFolderName}");
+
+                string finalErrorFolder =
+                    $"{string.Format(site.StageOutputFolderPath, Constants.SampleType.Specimen)}{id}_{subFolderName}";
+
+                Directory.Move(tempDirPath, finalErrorFolder);
+
+                string name = Path.GetFileName(file);
+
+                InsertDataSyncFileDetails(site, name, null, "Error - Invalid file uploaded", "Error");
+
+                errorBag[$"Invalid File Type - {name}"] =
+                    new Exception($"Invalid specimen file type for {site.Location}, file: {name}");
+            }
+        }
+
+        // ============================================================
+        // PROCESS A SINGLE FILE
+        // ============================================================
+        private void ProcessSingleFile(
+            SiteJSON site,
+            string file,
+            string tempDirPath,
+            string subFolderName,
+            Dictionary<string, Exception> errorBag)
+        {
+            var context = new IDDAContext();
+            var guid = Guid.NewGuid();
+
+            string fileName = Path.GetFileName(file);
+            var dataTable = new CSVHelper().ReadFile(file, Constants.SampleType.Specimen);
+
+            // -----------------------------------------------
+            // FIRST → INSERT FILE LOG HEADER (Your requirement)
+            // -----------------------------------------------
+            int? fileId = InsertDataSyncFileDetails(
+                site,
+                fileName,
+                dataTable?.Rows.Count,
+                "Processing started",
+                "In-Progress"
+            );
+
+            // EMPTY FILE
+            if (dataTable == null || dataTable.Rows.Count == 0)
+            {
+                LogHelper.WriteErrorMessage(
+                    tempDirPath,
+                    guid + "_Error",
+                    $"{Constants.SampleType.Specimen}{Environment.NewLine} Error reading file, invalid file uploaded.{Environment.NewLine}{subFolderName}");
+
+                new StageSpecimenRepository(context).UpdateStageSpecimen(guid, fileId);
+
+                MoveToOutputFolder(site, tempDirPath, guid, subFolderName);
+                return;
+            }
+
+            FileResult result;
+
+            try
+            {
+                // result = new StageSpecimenRepository(context).InsertStageSpecimen(guid, dataTable, site);
+                result = new FileResult { Success = false, Message = "Insert code removed in snippet" };
+            }
+            catch (Exception ex)
+            {
+                HandleInsertFailure(site, guid, tempDirPath, subFolderName, ex);
+                new StageSpecimenRepository(context).UpdateStageSpecimen(guid, fileId);
+                return;
+            }
+
+            if (result.Success)
+            {
+                HandleSuccess(site, result, file, tempDirPath, guid, subFolderName, context, fileId, dataTable.Rows.Count);
+            }
+            else
+            {
+                HandleFailure(site, result, file, tempDirPath, guid, subFolderName, context, fileId);
+            }
+        }
+
+        // ============================================================
+        // SUCCESS
+        // ============================================================
+        private void HandleSuccess(
+            SiteJSON site,
+            FileResult result,
+            string file,
+            string tempDirPath,
+            Guid guid,
+            string subFolderName,
+            IDDAContext context,
+            int? fileId,
+            int rowCount)
+        {
+            var fileName = Path.GetFileName(file);
+
+            LogHelper.WriteErrorMessage(
+                tempDirPath,
+                guid + "_Success",
+                $"Specimen Data from {fileName} was uploaded to {Environment.NewLine}{result.Message}");
+
+            new StageSpecimenRepository(context).UpdateStageSpecimen(guid, fileId);
+
+            LogHelper.WriteLog(
+                site.LogFolderPath + site.ProcessLogFileName,
+                $"{Constants.SampleType.Specimen} {Constants.SuccessfullySynced}");
+
+            File.Delete(file);
+
+            MoveToOutputFolder(site, tempDirPath, guid, subFolderName);
+        }
+
+        // ============================================================
+        // FAILURE
+        // ============================================================
+        private void HandleFailure(
+            SiteJSON site,
+            FileResult result,
+            string file,
+            string tempDirPath,
+            Guid guid,
+            string subFolderName,
+            IDDAContext context,
+            int? fileId)
+        {
+            var fileName = Path.GetFileName(file);
+
+            LogHelper.WriteErrorMessage(
+                tempDirPath,
+                guid + "_Error",
+                $"{Constants.SampleType.Specimen}{Environment.NewLine}{result.Message}{Environment.NewLine}{subFolderName}");
+
+            new StageSpecimenRepository(context).UpdateStageSpecimen(guid, fileId);
+
+            LogHelper.WriteLog(
+                site.LogFolderPath + site.ProcessLogFileName,
+                $"{Constants.SampleType.Specimen} {Constants.FailedSync}");
+
+            MoveToOutputFolder(site, tempDirPath, guid, subFolderName);
+        }
+
+        // ============================================================
+        // INSERT FAILURE
+        // ============================================================
+        private void HandleInsertFailure(
+            SiteJSON site,
+            Guid guid,
+            string tempDirPath,
+            string subFolderName,
+            Exception ex)
+        {
+            LogHelper.WriteErrorMessage(
+                tempDirPath,
+                guid + "_Error",
+                $"{Constants.SampleType.Specimen}{Environment.NewLine} Error inserting records.{Environment.NewLine}{subFolderName}");
+
+            LogHelper.WriteErrorLog(site.LogFolderPath + site.ProcessErrorFileName, ex.ToString());
+        }
+
+        private void MoveToOutputFolder(SiteJSON site, string tempDirPath, Guid guid, string subFolderName)
+        {
+            string finalFolder =
+                $"{string.Format(site.StageOutputFolderPath, Constants.SampleType.Specimen)}{guid}_{subFolderName}";
+
+            Directory.Move(tempDirPath, finalFolder);
+        }
+
+        private static void CleanUpFolder(string folder)
+        {
+            if (Directory.Exists(folder))
+                Directory.Delete(folder, true);
+        }
+
+        // ⚠️ Required to be kept but not needed
+        private static void CleanupFolders(SiteJSON site)
+        {
+            Directory.Move(
+                string.Format(site.ProcessingFolderPath, Constants.SampleType.Specimen),
+                string.Format(site.StageOutputFolderPath, Constants.SampleType.Specimen));
+        }
+
+        // ============================================================
+        // INSERT DATA SYNC FILE DETAILS (NOW CALLED FIRST)
+        // ============================================================
+        private static int? InsertDataSyncFileDetails(
+            SiteJSON site,
+            string fileName,
+            int? count,
+            string comments,
+            string resultMsg)
+        {
+            comments = comments.Substring(0, Math.Min(comments.Length, 1997));
+
+            var context = new IDDAContext();
+
+            var model = new StageDatSyncFile
+            {
+                FileTypeID = Constants.FileTypes.Specimen,
+                SiteName = site.SiteName,
+                Count = count,
+                Comments = comments,
+                FileName = fileName,
+                Location = site.Location,
+                Status = resultMsg,
+                Created = DateTime.Now,
+                CreatedBy = null
+            };
+
+            return new DataSyncFileRepository(context).InsertDataSyncFileDetails(model);
+        }
+    }
+}
+internal class StageSpecimenRepository
+{
+    private readonly IDDAContext context;
+
+    public StageSpecimenRepository(IDDAContext context)
+    {
+        this.context = context;
+    }
+
+    // --------------------------------------------------------
+    // PRIVATE: Converts DataTable rows → StageSpecimen list
+    // --------------------------------------------------------
+    private List<StageSpecimen> ProcessStageSpecimens(Guid guid, DataTable dataTable, SiteJSON site)
+    {
+        List<StageSpecimen> specimenList = new();
+
+        try
+        {
+            int index = 0;
+
+            foreach (DataRow row in dataTable.Rows)
+            {
+                index++;
+                // Extract all fields unchanged
+                string rowSex = Convert.ToString(row["Sex"]);
+                string rowStudy = Convert.ToString(row["Study"]);
+                string rowDeidentifiedPatientID = Convert.ToString(row["DeidentifiedPatientID"]);
+                string rowSpecimenID = Convert.ToString(row["SpecimenIdentifier"]);
+                string rowNoOfAliquots = Convert.ToString(row["NoOfAliquots"]);
+                string rowCity = Convert.ToString(row["City"]);
+                string rowCollectionSite = Convert.ToString(row["CollectionSite"]);
+                string rowClinicType = Convert.ToString(row["ClinicType"]);
+                string rowDrawDate = Convert.ToString(row["CollectionDate(YYYY-MM-DD)"]);
+                string rowComments = Convert.ToString(row["Comments"]);
+                string rowAge = Convert.ToString(row["Age"]);
+
+                // All volumes
+                string rowSerumVolume = Convert.ToString(row["Serum_Volume"]);
+                string rowPlasmaVolume = Convert.ToString(row["Plasma_Volume"]);
+                string rowWholeBloodVolume = Convert.ToString(row["Whole_Blood_Volume"]);
+                string rowVtmVolume = Convert.ToString(row["VTM_Volume"]);
+                string rowCultureVolume = Convert.ToString(row["Culture_Volume"]);
+                string rowUrineVolume = Convert.ToString(row["Urine_Volume"]);
+                string rowStoolVolume = Convert.ToString(row["Stool_Volume"]);
+                string rowCsfVolume = Convert.ToString(row["CSF_Volume"]);
+                string rowSputumVolume = Convert.ToString(row["Sputum_Volume"]);
+                string rowRespiratorySwabVolume = Convert.ToString(row["Respiratory_Swab_Volume"]);
+                string rowSkinLesionSwabVolume = Convert.ToString(row["Skin_Lesion_Swab_Volume"]);
+                string rowCervicalSwabVolume = Convert.ToString(row["Cervical_Swab_Volume"]);
+                string rowInsectPoolsVolume = Convert.ToString(row["Insect_Pools_Volume"]);
+                string rowWasteWaterVolume = Convert.ToString(row["Waste_Water_Volume"]);
+                string rowOtherVolume = Convert.ToString(row["Other_Volume"]);
+                string rowUnknownVolume = Convert.ToString(row["Unknown_Volume"]);
+
+                var specimen = new StageSpecimen
+                {
+                    Sex = rowSex?.RemoveNullandSpace(),
+                    Study = rowStudy,
+                    DeidentifiedPatientID = rowDeidentifiedPatientID?.RemoveNullandSpace(),
+                    SpecimenIdentifier = rowSpecimenID?.RemoveNullandSpace() ?? string.Empty,
+                    NumberOfAliquot = rowNoOfAliquots?.RemoveNullandSpace(),
+                    City = rowCity?.RemoveNullandSpace(),
+                    CollectionSite = rowCollectionSite?.RemoveNullandSpace(),
+                    ClinicType = rowClinicType?.RemoveNullandSpace(),
+                    CollectionDate = DateTime.TryParse(rowDrawDate, out var d) ? d : null,
+                    Comments = rowComments?.RemoveNullandSpace(),
+                    Age = string.IsNullOrEmpty(rowAge) ? null : StringExtension.TruncateString(rowAge),
+                    ProcessId = guid.ToString(),
+                    Created = DateTime.Now,
+                    SiteCountryCode = site.CountryCode,
+                    SiteShortCode = site.ShortCode,
+                    SiteName = site.SiteName,
+                    RowNumber = index,
+
+                    SerumVolume = StringExtension.TruncateString(rowSerumVolume),
+                    PlasmaVolume = StringExtension.TruncateString(rowPlasmaVolume),
+                    WholeBloodVolume = StringExtension.TruncateString(rowWholeBloodVolume),
+                    VtmVolume = StringExtension.TruncateString(rowVtmVolume),
+                    CultureVolume = StringExtension.TruncateString(rowCultureVolume),
+                    UrineVolume = StringExtension.TruncateString(rowUrineVolume),
+                    StoolVolume = StringExtension.TruncateString(rowStoolVolume),
+                    CsfVolume = StringExtension.TruncateString(rowCsfVolume),
+                    SputumVolume = StringExtension.TruncateString(rowSputumVolume),
+                    RespiratorySwabVolume = StringExtension.TruncateString(rowRespiratorySwabVolume),
+                    SkinLesionSwabVolume = StringExtension.TruncateString(rowSkinLesionSwabVolume),
+                    CervicalSwabVolume = StringExtension.TruncateString(rowCervicalSwabVolume),
+                    InsectPoolsVolume = StringExtension.TruncateString(rowInsectPoolsVolume),
+                    WasteWaterVolume = StringExtension.TruncateString(rowWasteWaterVolume),
+                    OtherVolume = StringExtension.TruncateString(rowOtherVolume),
+                    UnknownVolume = StringExtension.TruncateString(rowUnknownVolume)
+                };
+
+                specimenList.Add(specimen);
+            }
+        }
+        catch (Exception ex)
+        {
+            // LOGGING ADDED
+            LogHelper.WriteErrorLog("specimen_processing.log", $"Error parsing StageSpecimen rows: {ex}");
+        }
+
+        return specimenList;
+    }
+
+    // --------------------------------------------------------
+    // INSERT INTO STAGE TABLE + RUN VALIDATIONS
+    // --------------------------------------------------------
+    public FileResult InsertStageSpecimen(Guid guid, DataTable dataTable, SiteJSON site)
+    {
+        var specimenList = ProcessStageSpecimens(guid, dataTable, site);
+
+        if (specimenList.Count == 0)
+            return new FileResult { Success = false, Message = "No data provided in the sheet." };
+
+        context.StageSpecimen.AddRange(specimenList);
+        context.SaveChanges();
+
+        return ProcessSpecimen(guid.ToString());
+    }
+
+    // --------------------------------------------------------
+    // RUN VALIDATION SPs + FINAL INSERT
+    // --------------------------------------------------------
+    public FileResult ProcessSpecimen(string processId)
+    {
+        var conn = context.Database.GetDbConnection();
+        if (conn.State != ConnectionState.Open)
+            conn.Open();
+
+        ExecuteSp("sp_specimen_validate_studytype", processId, conn, 1);
+        ExecuteSp("sp_specimen_validate_volumes", processId, conn, 2);
+        ExecuteSp("sp_specimen_validate_duplicates", processId, conn, 3);
+        ExecuteSp("sp_specimen_validate_misc", processId, conn, 4);
+
+        int errorCount = GetErrorCount(processId, conn);
+
+        if (errorCount > 0)
+            return LoadErrors(processId, conn);
+
+        DataTable dt = new();
+
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = "sp_specimen_insert_records";
+            cmd.CommandType = CommandType.StoredProcedure;
+
+            var p = cmd.CreateParameter();
+            p.ParameterName = "mPROCESS_ID";
+            p.Value = processId;
+            cmd.Parameters.Add(p);
+
+            dt.Load(cmd.ExecuteReader());
+        }
+
+        var dtResults = (from DataRow dr in dt.Rows
+                         select new DataProcessResult
+                         {
+                             Message = dr["MSG"].ToString(),
+                             RecordProcessed = Convert.ToInt32(dr["RECORD_CNT"]),
+                             SuccessMessage = dr["SUCCESS_MSG"].ToString()
+                         }).ToList();
+
+        if (dtResults.Count > 0 &&
+            dtResults.First().Message == "Success")
+        {
+            return new FileResult
+            {
+                Success = true,
+                Message = dtResults.First().SuccessMessage
+            };
+        }
+
+        string errorMsgsString = string.Join(Environment.NewLine, dtResults.Select(s => s.Message));
+        return new FileResult { Success = false, Message = errorMsgsString.Trim() };
+    }
+
+    // --------------------------------------------------------
+    // UPDATE FILE ID
+    // --------------------------------------------------------
+    public FileResult UpdateStageSpecimen(Guid guid, int? fileId)
+    {
+        var specimenList = context.StageSpecimen.Where(x => x.ProcessId == guid.ToString()).ToList();
+
+        foreach (var item in specimenList)
+            item.FileID = fileId;
+
+        if (specimenList.Count > 0)
+        {
+            context.StageSpecimen.UpdateRange(specimenList);
+            context.SaveChanges();
+
+            return new FileResult { Success = true, Message = "Stage table update completed" };
+        }
+
+        return new FileResult { Success = false, Message = "Stage table update failed" };
+    }
+
+    // --------------------------------------------------------
+    // STORED PROCEDURE EXECUTION
+    // --------------------------------------------------------
+    private void ExecuteSp(string spName, string processId, DbConnection conn, int stepNo)
+    {
+        try
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = spName;
+            cmd.CommandType = CommandType.StoredProcedure;
+
+            var p = cmd.CreateParameter();
+            p.ParameterName = "mPROCESS_ID";
+            p.Value = processId;
+            cmd.Parameters.Add(p);
+
+            cmd.ExecuteNonQuery();
+        }
+        catch (Exception ex)
+        {
+            LogHelper.WriteErrorLog("specimen_processing.log",
+                $"Error executing SP {spName} at step {stepNo}: {ex}");
+
+            throw new Exception($"Unable to process the Specimens, process stopped at Step# {stepNo}");
+        }
+    }
+
+    private int GetErrorCount(string processId, DbConnection conn)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText =
+            "SELECT COUNT(*) FROM stage_specimen WHERE ERROR_MSG IS NOT NULL AND PROCESS_ID = @p";
+
+        var p = cmd.CreateParameter();
+        p.ParameterName = "@p";
+        p.Value = processId;
+        cmd.Parameters.Add(p);
+
+        return Convert.ToInt32(cmd.ExecuteScalar());
+    }
+
+    private FileResult LoadErrors(string processId, DbConnection conn)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText =
+            @"SELECT CONCAT('Row# ', row_no, ' ', TRIM(ERROR_MSG)) AS MSG
+              FROM stage_specimen
+              WHERE ERROR_MSG IS NOT NULL AND PROCESS_ID = @p";
+
+        var p = cmd.CreateParameter();
+        p.ParameterName = "@p";
+        p.Value = processId;
+        cmd.Parameters.Add(p);
+
+        string errorMessage = "";
+
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+            errorMessage += reader.GetString("MSG") + Environment.NewLine;
+
+        return new FileResult { Success = false, Message = errorMessage.Trim() };
+    }
+}
