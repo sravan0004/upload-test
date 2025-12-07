@@ -1,3 +1,147 @@
+DELIMITER $$
+
+CREATE PROCEDURE sp_specimen_validate_duplicates(IN m_PROCESS_ID VARCHAR(100))
+BEGIN
+    -- ============================================================
+    -- STEP 0: Cleanup helper table
+    -- ============================================================
+    DELETE FROM stage_specimen_dups WHERE process_id = m_PROCESS_ID;
+
+    -- ============================================================
+    -- STEP 1: Collect duplicate Specimen Identifier
+    -- ============================================================
+    INSERT INTO stage_specimen_dups (process_id, specimen_identifier, dup_type)
+    SELECT m_PROCESS_ID, specimen_identifier, 1
+    FROM stage_specimen
+    WHERE process_id = m_PROCESS_ID
+    GROUP BY specimen_identifier
+    HAVING COUNT(*) > 1;
+
+    -- ============================================================
+    -- STEP 2: Collect duplicate Deidentified Patient ID
+    -- ============================================================
+    INSERT INTO stage_specimen_dups (process_id, deidentified_patient_id, dup_type)
+    SELECT m_PROCESS_ID, deidentified_patient_id, 2
+    FROM stage_specimen
+    WHERE process_id = m_PROCESS_ID
+    GROUP BY deidentified_patient_id
+    HAVING COUNT(*) > 1;
+
+    -- ============================================================
+    -- STEP 3: Collect duplicate Specimen + Patient combinations
+    -- ============================================================
+    INSERT INTO stage_specimen_dups (process_id, specimen_identifier, deidentified_patient_id, dup_type)
+    SELECT m_PROCESS_ID, specimen_identifier, deidentified_patient_id, 3
+    FROM stage_specimen
+    WHERE process_id = m_PROCESS_ID
+    GROUP BY specimen_identifier, deidentified_patient_id
+    HAVING COUNT(*) > 1;
+
+    -- ============================================================
+    -- STEP 4: Update duplicate Specimen Identifier within Stage
+    -- ============================================================
+    UPDATE stage_specimen s
+    JOIN stage_specimen_dups d
+        ON d.process_id = s.process_id
+       AND d.dup_type = 1
+       AND s.specimen_identifier = d.specimen_identifier
+    SET s.ERROR_MSG = CONCAT(
+            COALESCE(s.ERROR_MSG, ''),
+            ' Error - Duplicate entry detected for the Specimen Identifier (',
+            s.specimen_identifier, '). '
+        )
+    WHERE s.process_id = m_PROCESS_ID;
+
+    -- ============================================================
+    -- STEP 5: Update duplicate Deidentified Patient ID within Stage
+    -- ============================================================
+    UPDATE stage_specimen s
+    JOIN stage_specimen_dups d
+        ON d.process_id = s.process_id
+       AND d.dup_type = 2
+       AND s.deidentified_patient_id = d.deidentified_patient_id
+    SET s.ERROR_MSG = CONCAT(
+            COALESCE(s.ERROR_MSG, ''),
+            ' Error - Duplicate entry detected for the Deidentified Patient ID (',
+            s.deidentified_patient_id, '). '
+        )
+    WHERE s.process_id = m_PROCESS_ID;
+
+    -- ============================================================
+    -- STEP 6: Duplicate Specimen + Patient combination within Stage
+    -- ============================================================
+    UPDATE stage_specimen s
+    JOIN stage_specimen_dups d
+        ON d.process_id = s.process_id
+       AND d.dup_type = 3
+       AND s.specimen_identifier = d.specimen_identifier
+       AND s.deidentified_patient_id = d.deidentified_patient_id
+    SET s.ERROR_MSG = CONCAT(
+            COALESCE(s.ERROR_MSG, ''),
+            ' Error - Duplicate entry detected for the combination of Specimen Identifier & Deidentified Patient ID (',
+            s.specimen_identifier, ', ', s.deidentified_patient_id, '). '
+        )
+    WHERE s.process_id = m_PROCESS_ID;
+
+    -- ============================================================
+    -- STEP 7: Duplicate Specimen Identifier (STAGE vs ACTUAL)
+    -- ============================================================
+    UPDATE stage_specimen s
+    JOIN specimen sp 
+        ON s.specimen_identifier = sp.specimen_identifier
+    SET s.ERROR_MSG = CONCAT(
+            COALESCE(s.ERROR_MSG, ''),
+            ' Error - Specimen Identifier (',
+            s.specimen_identifier,
+            ') already exists in the database. '
+        )
+    WHERE (sp.deleted IS NULL OR sp.deleted = 0)
+      AND s.process_id = m_PROCESS_ID;
+
+    -- ============================================================
+    -- STEP 8: Duplicate Specimen + Patient (STAGE vs ACTUAL)
+    -- ============================================================
+    UPDATE stage_specimen s
+    JOIN specimen sp 
+        ON s.specimen_identifier = sp.specimen_identifier
+       AND s.deidentified_patient_id = sp.deidentified_patient_id
+    SET s.ERROR_MSG = CONCAT(
+            COALESCE(s.ERROR_MSG, ''),
+            ' Error - The combination of Specimen Identifier & Deidentified Patient ID (',
+            s.specimen_identifier, ', ', s.deidentified_patient_id,
+            ') already exists in the database. '
+        )
+    WHERE (sp.deleted IS NULL OR sp.deleted = 0)
+      AND s.process_id = m_PROCESS_ID;
+
+END$$
+
+DELIMITER ;
+
+
+CREATE TABLE IF NOT EXISTS stage_specimen_dups (
+    process_id VARCHAR(100),
+    specimen_identifier VARCHAR(255),
+    deidentified_patient_id VARCHAR(255),
+    dup_type TINYINT,
+    PRIMARY KEY (process_id, specimen_identifier, deidentified_patient_id, dup_type),
+    INDEX idx_process (process_id),
+    INDEX idx_spec (specimen_identifier),
+    INDEX idx_patient (deidentified_patient_id)
+);
+
+
+
+ALTER TABLE stage_specimen ADD INDEX idx_stage_process (process_id);
+ALTER TABLE stage_specimen ADD INDEX idx_stage_spec (specimen_identifier);
+ALTER TABLE stage_specimen ADD INDEX idx_stage_patient (deidentified_patient_id);
+ALTER TABLE stage_specimen ADD INDEX idx_stage_combined (specimen_identifier, deidentified_patient_id);
+
+ALTER TABLE specimen ADD INDEX idx_specimen_identifier (specimen_identifier);
+ALTER TABLE specimen ADD INDEX idx_specimen_combined (specimen_identifier, deidentified_patient_id);
+
+
+
 -- SP1: study type, required fields and length validations
 DROP PROCEDURE IF EXISTS `sp_specimen_validate_studytype`;
 DELIMITER $$
